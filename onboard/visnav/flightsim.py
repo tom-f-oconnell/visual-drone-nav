@@ -253,7 +253,7 @@ class FlightSim:
                 fix = self.nav.process(img, self.t, roll, pitch, yaw, max(h, 0.0))
                 if fix:
                     fixes += 1
-                    last_fix = self._ll_to_local(fix.lat, fix.lon).tolist() + [fix.inliers]
+                    last_fix = self._ll_to_local(fix.lat, fix.lon).tolist() + [round(fix.score, 1)]
                 if img is not None and self.t >= next_thumb:
                         next_thumb += cfg.thumb_every_s
                         small = cv2.resize(img, (192, int(192 * img.shape[0] / img.shape[1])), interpolation=cv2.INTER_AREA)

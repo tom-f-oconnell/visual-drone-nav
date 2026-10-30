@@ -114,7 +114,7 @@ def test_closed_loop_flight_sim(client, tmp_path):
 
     from visnav.flightsim import FlightSim, SimConfig, map_texture
     from visnav.main import main as visnav_main  # noqa: F401  (CLI import smoke test)
-    from visnav.matcher import FeatureBackend, MapMatcher
+    from visnav.matcher import CorrMatcher
     from visnav.navigator import Navigator
     from visnav.geo import MapRaster
     from visnav.ortho import CameraModel
@@ -133,8 +133,7 @@ def test_closed_loop_flight_sim(client, tmp_path):
     meta = json.loads((bundle / "mission.json").read_text())
     map_ = MapRaster.load(bundle / "map.tif")
     cam = CameraModel.from_hfov(960, 600, 90)
-    nav = Navigator(map_, cam, MapMatcher(map_, FeatureBackend("orb")), meta["home"]["lat"], meta["home"]["lon"],
-                    start_sigma_m=5.0)
+    nav = Navigator(map_, cam, CorrMatcher(map_), meta["home"]["lat"], meta["home"]["lon"], start_sigma_m=5.0)
     sim = FlightSim(map_, cam, nav, meta, SimConfig(camera_hz=2.0, seed=5, att_noise_deg=0.5))
     records, summary = sim.run()
     assert summary["landed"], summary

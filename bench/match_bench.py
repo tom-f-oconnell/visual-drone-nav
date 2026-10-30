@@ -41,8 +41,11 @@ def tag(spec: str) -> str:
     return re.sub(r"[^A-Za-z0-9.=-]+", "_", spec)
 
 
-def route_poses(site: str, data: Path, n: int, seed: int):
-    """The site's map, camera and n (index, pose) pairs evenly spaced along the route."""
+def route_poses(site: str, data: Path, n: int, seed: int, height: float | None = None):
+    """The site's map, camera and n (index, pose) pairs evenly spaced along the route.
+
+    height overrides the mission's flying height, m AGL.
+    """
     from visnav.geo import MapRaster
     from visnav.ortho import CameraModel
     from visnav.sim import fly_route
@@ -51,14 +54,15 @@ def route_poses(site: str, data: Path, n: int, seed: int):
     map_ = MapRaster.load(data / site / "map" / "map.tif")
     c = meta["mission"]["camera"]
     cam = CameraModel.from_hfov(c["width_px"], c["height_px"], c["hfov_deg"])
-    route = [(w["lat"], w["lon"], w["alt"] or meta["mission"]["default_alt"]) for w in meta["mission"]["waypoints"]]
+    route = [(w["lat"], w["lon"], height or w["alt"] or meta["mission"]["default_alt"])
+             for w in meta["mission"]["waypoints"]]
     poses = list(fly_route(map_, route, meta["mission"]["speed"], 1.0, np.random.default_rng(seed)))
     idx = np.unique(np.linspace(0, len(poses) - 1, n).round().astype(int))
     return map_, cam, [(int(i), poses[i]) for i in idx]
 
 
 def frames(site: str, data: Path, n: int, seed: int, att_noise: float, yaw_noise: float, alt_noise: float,
-           same_year: bool = False, detail: float = 0.0):
+           same_year: bool = False, detail: float = 0.0, height: float | None = None):
     """Yield (index, pose, ortho, heading error, rng, map) for n frames evenly spaced along the route.
 
     The navigator is given roll/pitch with att_noise, heading with yaw_noise
@@ -71,7 +75,7 @@ def frames(site: str, data: Path, n: int, seed: int, att_noise: float, yaw_noise
     from visnav.ortho import orthorectify
     from visnav.sim import render
 
-    map_, cam, poses = route_poses(site, data, n, seed)
+    map_, cam, poses = route_poses(site, data, n, seed, height)
     world = map_ if same_year else MapRaster.load(data / site / "world.tif")
     key = zlib.crc32(site.encode())
     kw = {"detail": detail} if "detail" in inspect.signature(render).parameters else {}
@@ -101,7 +105,7 @@ def run_job(site: str, spec: str, data: Path, out: Path, args) -> str:
             torch.set_num_interop_threads(1)
     rows, matcher, setup_s = [], None, 0.0
     for i, p, ortho, yaw_err, rng, map_ in frames(site, data, args.frames, args.seed, args.att_noise,
-                                                    args.yaw_noise, args.alt_noise, args.same_year, args.detail):
+                                                    args.yaw_noise, args.alt_noise, args.same_year, args.detail, args.height):
         if matcher is None:
             t0 = time.perf_counter()
             matcher = matchers.make(spec, map_)
@@ -154,6 +158,7 @@ def main(argv=None):
     ap.add_argument("--same-year", action="store_true", help="render frames from the map, not the world")
     ap.add_argument("--detail", type=float, default=0.0,
                     help="contrast of visnav.sim.render's procedural ground texture (0: NAIP only)")
+    ap.add_argument("--height", type=float, help="m AGL to fly at instead of the mission's height")
     ap.add_argument("--jobs", type=int, default=12, help="processes")
     ap.add_argument("--threads", type=int, default=1, help="threads per process")
     args = ap.parse_args(argv)

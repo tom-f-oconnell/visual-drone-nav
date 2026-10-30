@@ -32,7 +32,7 @@ EK3_SRC1_YAW 1
 EK3_GPS_CHECK 0
 
 # Downward rangefinder improves orthorectification scale. It must reach cruise
-# height to help (vision only locks above ~65 m), so a long range lidar, e.g. a
+# height to help (the map is only matched from about 60 m up), so a long range lidar, e.g. a
 # Benewake TF03 (100 or 180 m variants) on SERIAL4. Type 19 is the TF02 (22 m).
 RNGFND1_TYPE 27
 RNGFND1_ORIENT 25

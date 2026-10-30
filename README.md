@@ -65,9 +65,10 @@ the navigator starts there (`--start lat,lon` and `--start-sigma` otherwise), so
 ArduPilot has a position to arm with and no GNSS is needed at any point. On the
 ground it holds that position; from about 1 m up, frame-to-frame visual
 odometry from the same camera tracks the vehicle through takeoff, landing and
-gaps between map fixes; above `--min-alt` (25 m) frames are also matched to the
-NAIP map. Set `--home-alt` to the launch site's elevation (m AMSL) so the EKF
-origin has the right height.
+gaps between map fixes; from about 60 m up (with a 90° lens) frames are also
+matched to the NAIP map. `--matcher` selects how: `corr` (the default), `orb`,
+`akaze`, `sift`, or several joined by `+` to try in that order. Set `--home-alt`
+to the launch site's elevation (m AMSL) so the EKF origin has the right height.
 
 `run` writes `visnav_<time>.csv` in the bundle with every fix, the FC position
 and the real GPS (if fitted as GPS2), so flights can be scored afterwards.
@@ -162,6 +163,9 @@ python tools/sitl_flight.py --bundle ~/missions/mission1 --arducopter ./arducopt
     --defaults copter.parm --out sitl_out          # prints errors against SITL truth
 ```
 
+Add `--visnav-args "--world OTHER_YEAR/map.tif"` to render the camera from another
+NAIP year.
+
 Compare map matchers across NAIP years on 12 sites (`pip install torch kornia`
 for the LightGlue matchers):
 
@@ -183,10 +187,13 @@ pytest tests
   and exports the 3D replay.
 * `test_mavlink.py` uploads a mission and sends GPS_INPUT to a fake flight
   controller over UDP, and checks the 3D viewer can follow it.
+* `test_matcher.py` covers the correlation matcher, matcher chains and the
+  re-lock rule.
 * `test_naip.py` checks cached cells land exactly on the UTM grid, including
   when read from a COG overview.
 * `test_odometry.py` checks odometry against known moves from 2 to 120 m, the
-  navigator's position on the ground before any fix, and the fix-bias model.
+  navigator's position on the ground before any fix, the fix-bias model, and
+  that uncertainty keeps up with the distance flown without fixes.
 
 The tests use a procedurally generated stand-in for NAIP, so they run offline.
 To run the same test on real imagery, download NAIP GeoTIFFs and set

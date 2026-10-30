@@ -21,7 +21,7 @@ import numpy as np
 from pyproj import Geod
 
 from .geo import MapRaster
-from .matcher import FeatureBackend, MapMatcher
+from .matcher import ChainMatcher, CorrMatcher, FeatureBackend, MapMatcher
 from .navigator import Navigator
 from .ortho import CameraModel
 
@@ -47,8 +47,19 @@ def camera_from_args(args, meta) -> CameraModel:
     return CameraModel.from_hfov(c["width_px"], c["height_px"], c["hfov_deg"])
 
 
+def build_matcher(args, map_):
+    """args.matcher: "corr", a feature type, or several joined by "+" to try in that order."""
+    def one(name):
+        if name == "corr":
+            return CorrMatcher(map_, min_score=args.min_score)
+        return MapMatcher(map_, FeatureBackend(name, args.nfeatures), min_inliers=args.min_inliers)
+
+    parts = [one(name) for name in args.matcher.split("+")]
+    return parts[0] if len(parts) == 1 else ChainMatcher(*parts)
+
+
 def build_navigator(args, meta, map_, cam, start=None) -> Navigator:
-    matcher = MapMatcher(map_, FeatureBackend(args.features, args.nfeatures), min_inliers=args.min_inliers)
+    matcher = build_matcher(args, map_)
     lat, lon = start or (meta["home"]["lat"], meta["home"]["lon"])
     return Navigator(map_, cam, matcher, lat, lon, start_sigma_m=args.start_sigma, min_map_alt=args.min_alt)
 
@@ -69,7 +80,7 @@ def cmd_run(args):
     if args.camera == "sitl":
         from .camera import SitlCamera
 
-        grabber = SitlCamera(ap, map_, cam)
+        grabber = SitlCamera(ap, load_world(args, map_), cam)
         args.latency = 0.0
     else:
         grabber = FrameGrabber(args.camera, cam.width, cam.height)
@@ -94,7 +105,7 @@ def cmd_run(args):
     log_path = bundle / f"visnav_{time.strftime('%Y%m%d_%H%M%S')}.csv"
     with open(log_path, "w", newline="") as fh:
         out = csv.writer(fh)
-        out.writerow(["t", "lat", "lon", "inliers", "rmse_px", "scale", "heading_err_deg", "sigma_m",
+        out.writerow(["t", "lat", "lon", "score", "strong", "inliers", "rmse_px", "scale", "heading_err_deg", "sigma_m",
                       "h_agl", "fc_lat", "fc_lon", "gps2_lat", "gps2_lon"])
         last_t, last_status = 0.0, 0.0
         try:
@@ -110,11 +121,12 @@ def cmd_run(args):
                 fix = nav.process(frame, t_cap, att.roll, att.pitch, att.yaw, h)
                 if fix:
                     g2 = ap.gps_raw
-                    out.writerow([f"{t_cap:.3f}", f"{fix.lat:.7f}", f"{fix.lon:.7f}", fix.inliers,
+                    out.writerow([f"{t_cap:.3f}", f"{fix.lat:.7f}", f"{fix.lon:.7f}", f"{fix.score:.2f}", int(fix.strong), fix.inliers,
                                   f"{fix.rmse_px:.2f}", f"{fix.scale:.3f}", f"{fix.heading_err_deg:.1f}",
                                   f"{fix.sigma_m:.1f}", f"{h:.1f}", ap.pos.lat if ap.pos else "",
                                   ap.pos.lon if ap.pos else "", g2.lat / 1e7 if g2 else "",
                                   g2.lon / 1e7 if g2 else ""])
+                    fh.flush()  # the log must survive power being cut at landing
                 if t - last_status > 5:
                     last_status = t
                     st = nav.state(time.monotonic())
@@ -157,7 +169,7 @@ def cmd_sim(args):
         if st:
             errs.append(GEOD.inv(pose.lon, pose.lat, st.lon, st.lat)[2])
         if args.verbose and fix:
-            log.info("t=%.1f inliers=%d err=%.1fm", pose.t, fix.inliers, errs[-1])
+            log.info("t=%.1f score=%.1f err=%.1fm", pose.t, fix.score, errs[-1])
     e = np.array(errs)
     report = {
         "frames": n, "fix_rate": round(fixes / max(n, 1), 3),
@@ -250,9 +262,11 @@ def main(argv=None):
     def common(sp):
         sp.add_argument("--bundle", required=True, help="unzipped mission bundle directory")
         sp.add_argument("--calib", help="camera calibration JSON (default: from mission camera HFOV)")
-        sp.add_argument("--features", default="orb", choices=["orb", "akaze", "sift"])
+        sp.add_argument("--matcher", default="corr",
+                        help='"corr", "orb", "akaze", "sift", or several joined by "+" to try in that order')
+        sp.add_argument("--min-score", type=float, default=2.6, help="correlation score required of a fix")
         sp.add_argument("--nfeatures", type=int, default=3000)
-        sp.add_argument("--min-inliers", type=int, default=20)
+        sp.add_argument("--min-inliers", type=int, default=20, help="RANSAC inliers required of a feature fix")
         sp.add_argument("--start-sigma", type=float, default=5.0,
                         help="m, uncertainty of the start position (vehicle placed at the mission home)")
         sp.add_argument("--min-alt", type=float, default=25.0,
@@ -265,6 +279,7 @@ def main(argv=None):
 
     r = sub.add_parser("run", help="fly: camera + MAVLink")
     common(r)
+    world_arg(r)
     r.add_argument("--mavlink", default="/dev/ttyTHS1")
     r.add_argument("--baud", type=int, default=921600)
     r.add_argument("--camera", default="csi", help='"csi", "csi:N", V4L2 index, GStreamer pipeline, file, or "sitl"')

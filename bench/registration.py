@@ -26,8 +26,8 @@ import rasterio
 from rasterio.warp import Resampling, reproject
 
 from match_bench import route_poses
-from matchers import _parabolic, orientation_field
 from sites import BY_NAME, SITES
+from visnav.matcher import orientation_field, parabolic_2d
 
 WINDOW_M = 300.0
 MAX_OFFSET_M = 20.0
@@ -60,7 +60,7 @@ def offset_at(map_gray: np.ndarray, world_gray: np.ndarray, col: float, row: flo
     side = np.ones(R.shape, bool)
     side[h - m + y - 3:h - m + y + 4, h - m + x - 3:h - m + x + 4] = False
     psr = float((win[y, x] - R[side].mean()) / (R[side].std() + 1e-9))
-    dx, dy = _parabolic(win, y, x)
+    dx, dy = parabolic_2d(win, y, x)
     return -(y + dy - m) * gsd, (x + dx - m) * gsd, psr
 
 

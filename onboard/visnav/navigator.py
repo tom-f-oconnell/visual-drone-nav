@@ -17,7 +17,7 @@ import numpy as np
 
 from .filter import PositionFilter
 from .geo import MapRaster
-from .matcher import Fix, MapMatcher
+from .matcher import Fix
 from .odometry import FrameOdometry
 from .ortho import CameraModel, orthorectify
 
@@ -38,13 +38,14 @@ class NavState:
 
 
 class Navigator:
-    def __init__(self, map_: MapRaster, cam: CameraModel, matcher: MapMatcher,
+    def __init__(self, map_: MapRaster, cam: CameraModel, matcher,
                  start_lat: float, start_lon: float, start_sigma_m: float = 150.0,
                  max_search_m: float = 400.0, min_search_m: float = 40.0,
                  min_map_alt: float = 25.0, ground_alt: float = 1.0, accel_sigma: float = 4.0,
-                 odometry: FrameOdometry | None = None):
+                 odometry_drift: float = 0.05, odometry: FrameOdometry | None = None):
         """
         Args:
+            matcher: has locate(ortho, prior_col, prior_row, search_radius_px) -> Fix | None.
             start_sigma_m: 1-sigma of the start position; small when the
                 vehicle is placed at a known point, large to test acquisition.
             min_map_alt: m AGL below which frames are not matched to the map
@@ -53,6 +54,10 @@ class Navigator:
                 ground and still.
             accel_sigma: m/s^2, how hard the vehicle may accelerate between
                 updates in the air (on the ground it cannot).
+            odometry_drift: 1-sigma position error per metre flown on odometry.
+                Heading and scale errors persist from frame to frame, so this
+                grows with distance instead of averaging out; without it the
+                search radius stays small while the real error grows past it.
         """
         self.map, self.cam, self.matcher = map_, cam, matcher
         self.start = (start_lat, start_lon)
@@ -60,6 +65,8 @@ class Navigator:
         self.max_search_m, self.min_search_m = max_search_m, min_search_m
         self.min_map_alt, self.ground_alt = min_map_alt, ground_alt
         self.accel_sigma = accel_sigma
+        self.odometry_drift = odometry_drift
+        self.odometry_dist = 0.0  # m flown since the last map fix
         self.odometry = odometry or FrameOdometry(cam)
         self.kf = PositionFilter(accel_sigma)
         self.yaw_corr = 0.0  # rad added to the autopilot's yaw, learnt from map fixes (compass bias)
@@ -106,7 +113,10 @@ class Navigator:
         if motion is not None:
             ne_to_grid = np.linalg.inv(self.map.grid_to_ned_rotation(lat, lon))
             v = ne_to_grid @ np.array([motion.d_north, motion.d_east]) / motion.dt
+            dist = self.odometry_dist + float(np.hypot(motion.d_north, motion.d_east))
             with self._lock:
+                self.kf.add_position_variance(self.odometry_drift ** 2 * (dist ** 2 - self.odometry_dist ** 2))
+                self.odometry_dist = dist
                 if self.kf.update_velocity(v[0], v[1], motion.sigma / motion.dt, t):
                     self.last_update_t = t
         if h_agl < self.min_map_alt:
@@ -126,13 +136,14 @@ class Navigator:
         x, y = self.map.px_to_grid(fix.col, fix.row)
         with self._lock:
             accepted = self.kf.update(x, y, fix.sigma_m, t)
-            if not accepted and self.kf.rejects >= 3 and fix.inliers >= 2 * self.matcher.min_inliers:
+            if not accepted and self.kf.rejects >= 3 and fix.strong:
                 log.warning("re-locking on strong fixes after %d rejects", self.kf.rejects)
                 self.kf.reset(x, y, fix.sigma_m, t, v=self.kf.x[2:4], v_sigma=self.kf.vel_sigma())
                 accepted = True
             if not accepted:
                 return None
             self.last_fix_t = self.last_update_t = t
+            self.odometry_dist = 0.0
         self.last_fix = fix
         # The fix's rotation is the remaining heading error; low-pass it so one bad fix does little.
         self.yaw_corr += 0.2 * np.clip(np.radians(fix.heading_err_deg), -0.1, 0.1)

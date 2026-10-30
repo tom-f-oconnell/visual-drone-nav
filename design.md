@@ -16,15 +16,28 @@ Per camera frame (`onboard/visnav/navigator.py`):
    the previous frame's patch. The shift is a velocity measurement. Peaks with
    a response under 0.1 are rejected: every gross error measured had one, good
    matches score 0.3 and up.
-3. **Map matching** (above `--min-alt`, 25 m). Crop the NAIP mosaic around the
-   filter's prediction (radius 3 sigma, 40 to 400 m); ORB, ratio test, RANSAC
-   similarity; reject scale outside 0.8 to 1.25 or rotation over 30°.
+3. **Map matching** (`matcher.py`, once the footprint reaches 8000 m², about
+   60 m up with a 90° lens). Correlate the frame's contrast-invariant gradient
+   orientations with the NAIP mosaic around the filter's prediction (radius 3
+   sigma, 40 to 400 m): by FFT at 2.4 m/px with nine template rotations (±16°),
+   then refined at full resolution. The score is how far the peak stands out
+   from the rest of the search disc, as seen by each quarter of the frame on its
+   own. A fix needs 2.6 with a 40 m search, plus 0.7 per e-fold of radius (3.5 at
+   150 m, 4.2 at 400 m), since more candidates give chance peaks more
+   opportunity. A peak on the rim of the disc is rejected: the surface is only
+   rising toward something further out. `--matcher` also offers ORB, AKAZE or
+   SIFT with a RANSAC similarity, alone or chained (`corr+orb`).
 4. **Filter** (`filter.py`). Constant-velocity Kalman filter on map-grid
    metres with a chi-square gate, plus a **map-fix bias state**: consecutive
    fixes share most of their error (attitude or camera mount error times
    height, NAIP registration), so averaging them must not shrink the reported
    accuracy below that. Odometry measures velocity, which the bias does not
    affect. Process noise is 4 m/s² in the air and 0.1 m/s² on the ground.
+   Odometry's heading and scale errors persist from frame to frame, so position
+   uncertainty also grows by 5% of the distance flown since the last map fix.
+   Without that the search radius stayed at its 40 m minimum while the real
+   error passed 80 m, and the filter could never find the map again. Three
+   rejected fixes in a row and a strong one (score 4, or 40 inliers) re-lock it.
    The rotation of each map fit is the remaining compass error, low-passed
    into a heading correction used by both odometry and orthorectification.
 
@@ -58,15 +71,21 @@ Arming needs only visnav's fix: a GNSS on GPS2 that never gets a fix (jammed
 at launch) does not block it.
 
 Result, fully GNSS-denied mission in SITL (arm on vision, takeoff, three
-waypoints, RTL, land), frames rendered from the map's own year:
+waypoints, RTL, land) over the 2.4 km farm and suburb route east of Boulder, as
+median / p95 / max against SITL truth. "Same year" renders the camera from the
+map's own imagery; the other from NAIP two years later, with `visnav run --world`:
 
-| vs SITL truth | median | p95 | max |
-|---|---|---|---|
-| ArduPilot EKF, above 25 m | 1.2 m | 3.7 m | 7.5 m |
-| ArduPilot EKF, below 25 m (odometry only) | 0.2 m | 0.2 m | 0.2 m |
-| visnav GPS1, above 25 m | 2.1 m | 5.3 m | 9.4 m |
+| | same year | 2021 map, 2023 camera |
+|---|---|---|
+| ArduPilot EKF, above 25 m | 0.8 / 1.6 / 2.2 m | 2.8 / 7.2 / 7.7 m |
+| visnav GPS1, above 25 m | 1.3 / 2.5 / 3.1 m | 3.2 / 7.4 / 8.1 m |
+| ArduPilot EKF, below 25 m (odometry only) | 0.3 m | 3.1 m |
+| landing, from home | 0.4 m | 3.0 m |
 
-It landed 0.3 m from home and stayed in AUTO throughout.
+Both stayed in AUTO with no GPS glitch or failsafe. The 2023 flight went up to
+62 s between map fixes. On a bundle whose imagery stopped short of the return
+leg, odometry and matching both lost the ground, visnav stopped reporting a fix,
+and the EKF failsafe landed the vehicle where it was, as intended.
 
 `GPS_INPUT` reuses ArduPilot's GPS path, the simplest integration. For tighter
 fusion, `ODOMETRY` / `VISION_POSITION_ESTIMATE` with `EK3_SRC1_POSXY 6` is the
@@ -100,13 +119,33 @@ Planner: caching works against Planetary Computer; a 4-cell route takes ~40 s
 (286 s before reading each scene with one windowed read from the matching COG
 overview and fetching cells in parallel).
 
-Farm and suburb route east of Boulder (2.4 km, 120 m AGL), `sim3d`, two seeds:
+Closed-loop `sim3d` flights over the benchmark's twelve sites (below), map from
+one NAIP year and camera from the next, 90° lens, 120 m AGL. Errors are the
+autopilot's estimate against truth, averaged over the sites; three seeds per
+site unless noted:
 
-| | median | p95 | max | landing error |
-|---|---|---|---|---|
-| same year (2021 map and camera) | 2.5 m | 7.2 to 7.6 m | 9 to 14 m | 1 to 2 m |
-| 2021 map, camera from 2023 | 3.7 to 5.4 m | 17 to 21 m | 23 to 31 m | 2 to 7 m |
-| same, before odometry and fixes | 23 m | 171 m | 198 m | 228 m |
+| | median | p95 | max | landing error | worst landing | fixes |
+|---|---|---|---|---|---|---|
+| correlation (default) | 4.5 m | 14 m | 18 m | 5 m | 15 m | 61% |
+| ORB, as the default used to be | 18 m | 33 m | 36 m | 22 m | 48 m | 17% |
+| correlation, heading 15° off (one seed) | 38 m | 63 m | 72 m | 46 m | 257 m | 56% |
+| correlation, height 5% off (one seed) | 7.6 m | 18 m | 22 m | 9 m | 34 m | 51% |
+
+* On six sites (forest, towns, plantation, row crops, pivots) ORB gets almost no
+  fixes and its error climbs to 30 to 50 m. Correlation's median stays under 8 m
+  everywhere and its p95 under 20 m on all but the row crops and pivots (Iowa
+  26 m, Kansas 41 m), where it loses the map for a while and then, thanks to the
+  growing search radius, usually finds it again.
+* Nine template rotations rather than three cost twice the time (37 ms against
+  16 ms per frame) and make little difference in normal flight, but with a 15°
+  heading error the median goes from 160 m to 38 m. Larger heading errors are
+  not covered.
+* Adding ORB as a fallback (`corr+orb`) gains 1% more fixes for about 5 times
+  the time and barely helps with a 5% height error, so it is not the default.
+* A wrong fix is most dangerous low down: nothing later corrects it. Of 960
+  frames per height (three rotations, 40 m search), a score of 2.6 gives no
+  errors over 20 m at 90 m and up, but 0.1% at 60 m and 0.4% at 40 m, so small
+  footprints are not matched. Odometry is accurate there anyway.
 
 ## Matcher benchmark (`bench/`)
 
@@ -119,16 +158,17 @@ fixes.
 
 | matcher | correct at ≤1% wrong, 40 / 150 m search | same, only ≥20 m counts as wrong | ms/frame (one CPU thread) |
 |---|---|---|---|
-| ORB (current) | 35 / 26% | 40 / 26% | 116 / 140 |
-| gradient-orientation correlation | 45 / 48% | 74 / 70% | 19 / 24 |
-| DISK + LightGlue | 39 / 56% | 72 / 56% | 3400 / 7400 |
-| ALIKED + LightGlue | 60 / 42% | 66 / 50% | 2000 / 5000 |
+| ORB | 32 / 26% | 41 / 26% | 120 to 190 |
+| gradient-orientation correlation | 38 / 32% | 74 / 70% | 30 to 40 |
+| DISK + LightGlue (earlier run) | 39 / 56% | 72 / 56% | 3400 / 7400 |
+| ALIKED + LightGlue (earlier run) | 60 / 42% | 66 / 50% | 2000 / 5000 |
 
-* Correlation (`bench/matchers.py: CorrMatcher`) is the best general choice:
-  FFT correlation of contrast-invariant gradient orientations at 2.4 m/px with
-  ±4° template rotations, refined at full resolution, scored by the
-  peak-to-sidelobe ratio of each quarter of the frame. ORB then correlation
-  reaches 57 / 57%.
+* The filter tolerates near misses far better than gross errors, so the second
+  column predicts flights better than the first: correlation's lead over ORB is
+  much larger in flight than the first column suggests.
+* With three template rotations instead of nine, correlation scores 46 / 47% and
+  77 / 71%: the extra rotations give chance peaks more chances. They are worth it
+  for the heading errors they tolerate, see the flights above.
 * ALIKED + LightGlue is strongest in towns, forest edges and marsh and worth
   revisiting under TensorRT on the Jetson. SuperPoint's weights are
   non-commercial, so it was not tried.
@@ -139,9 +179,10 @@ fixes.
 
 ## Known limits and next steps
 
-* Integrate the correlation matcher (alone or after ORB). It returns no
-  inlier count, so the re-lock rule must move to its score.
 * Farmland needs multi-frame matching or route planning around it.
+* Correlation does not fit scale, so height errors over a few percent cost fixes.
+* The heading estimate from correlation under-reads (about 0.4 of the true error
+  between template rotations), so the correction converges slowly.
 * Flat-terrain assumption: hilly areas need the rangefinder or a DEM
   (Copernicus 30 m) for height above the ground under the camera.
 * NAIP is flown every 2 to 3 years in summer; snow, harvest and construction

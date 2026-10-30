@@ -84,6 +84,11 @@ class PositionFilter:
         self.P = (np.eye(6) - K @ H) @ self.P
         return True
 
+    def add_position_variance(self, var: float):
+        """Uncertainty that a motion model cannot express, in m^2 per axis."""
+        self.P[0, 0] += var
+        self.P[1, 1] += var
+
     def pos_sigma(self) -> float:
         return float(np.sqrt(max(self.P[0, 0], self.P[1, 1])))
 
