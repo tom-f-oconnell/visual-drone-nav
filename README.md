@@ -90,7 +90,7 @@ only. [design.md](design.md) explains each choice.
 ## Flight simulator and 3D viewer
 
 ```bash
-visnav sim3d --bundle ~/missions/mission1              # open http://127.0.0.1:8080/
+visnav sim3d --bundle ~/missions/mission1              # open http://127.0.0.1:27351/
 visnav sim3d --bundle ~/missions/mission1 --realtime 1 # pace at real time
 visnav sim3d --bundle ~/missions/mission1 --port 0 --export flight.html --exit
 ```

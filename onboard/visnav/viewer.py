@@ -71,7 +71,7 @@ def export_html(path: str | Path, scene: dict, records: list[dict], map_jpg: byt
     return path
 
 
-def serve(feed: FlightFeed, port: int = 8080, host: str = "127.0.0.1"):
+def serve(feed: FlightFeed, port: int = 27351, host: str = "127.0.0.1"):
     page = viewer_html("three.min.js").encode()
 
     class Handler(BaseHTTPRequestHandler):

@@ -305,7 +305,7 @@ def main(argv=None):
     f.add_argument("--wind-e", type=float, default=3.0, help="m/s wind toward east")
     f.add_argument("--wind-n", type=float, default=-1.5, help="m/s wind toward north")
     f.add_argument("--gust", type=float, default=1.5, help="m/s gust strength")
-    f.add_argument("--port", type=int, default=8080, help="viewer port, 0 for none")
+    f.add_argument("--port", type=int, default=27351, help="viewer port, 0 for none")
     f.add_argument("--host", default="127.0.0.1")
     f.add_argument("--realtime", type=float, default=0.0,
                    help="pace the sim at this multiple of real time (0 = as fast as possible)")
@@ -319,7 +319,7 @@ def main(argv=None):
     w.add_argument("--calib")
     w.add_argument("--mavlink", default="udpin:0.0.0.0:14551")
     w.add_argument("--baud", type=int, default=921600)
-    w.add_argument("--port", type=int, default=8080)
+    w.add_argument("--port", type=int, default=27351)
     w.add_argument("--host", default="127.0.0.1")
     w.set_defaults(func=cmd_view)
 
