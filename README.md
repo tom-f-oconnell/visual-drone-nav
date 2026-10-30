@@ -18,7 +18,7 @@ See the system diagram artifact for hardware wiring and data flow.
 ```bash
 cd ground
 pip install -r requirements.txt
-uvicorn planner.app:app --port 8000      # open http://localhost:8000
+uvicorn planner.app:app --port 8347      # open http://localhost:8347
 ```
 
 1. Click the map to add waypoints (drag to move, set per-waypoint altitude if needed).
@@ -122,7 +122,7 @@ mission a second time from a different NAIP year and render the camera from it
 with `--world` (`sim` takes it too):
 
 ```bash
-NAIPNAV_YEARS=2023 NAIPNAV_GSD=0.3 uvicorn planner.app:app --port 8001   # export the mission again
+NAIPNAV_YEARS=2023 NAIPNAV_GSD=0.3 uvicorn planner.app:app --port 8348   # export the mission again
 visnav sim3d --bundle ~/missions/mission1 --world ~/missions/mission1_2023/map.tif
 ```
 
