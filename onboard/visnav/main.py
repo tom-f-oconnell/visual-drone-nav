@@ -13,7 +13,6 @@ import argparse
 import csv
 import json
 import logging
-import math
 import threading
 import time
 from pathlib import Path
@@ -51,7 +50,7 @@ def camera_from_args(args, meta) -> CameraModel:
 def build_navigator(args, meta, map_, cam, start=None) -> Navigator:
     matcher = MapMatcher(map_, FeatureBackend(args.features, args.nfeatures), min_inliers=args.min_inliers)
     lat, lon = start or (meta["home"]["lat"], meta["home"]["lon"])
-    return Navigator(map_, cam, matcher, lat, lon, start_sigma_m=args.start_sigma)
+    return Navigator(map_, cam, matcher, lat, lon, start_sigma_m=args.start_sigma, min_map_alt=args.min_alt)
 
 
 # run ------------------------------------------------------------------------
@@ -74,19 +73,21 @@ def cmd_run(args):
         args.latency = 0.0
     else:
         grabber = FrameGrabber(args.camera, cam.width, cam.height)
-    lock = threading.Lock()
     stop = threading.Event()
 
     def sender():
-        period = 1 / args.gps_rate
+        # Fixed schedule: ArduPilot marks a GPS unhealthy if messages average over 215 ms apart.
+        period, next_t = 1 / args.gps_rate, time.monotonic()
         while not stop.is_set():
-            time.sleep(period)
-            with lock:
-                st = nav.state(time.monotonic())
-            if st is None or ap.pos is None:
+            next_t = max(next_t + period, time.monotonic())
+            time.sleep(max(next_t - time.monotonic(), 0.0))
+            st = nav.state(time.monotonic())
+            if st is None:
                 continue
-            healthy = st.last_fix_age < args.max_fix_age and st.sigma_m < args.lost_sigma
-            ap.send_gps_input(st.lat, st.lon, ap.pos.alt_msl, st.vn, st.ve,
+            healthy = st.last_update_age < args.max_fix_age and st.sigma_m < args.lost_sigma
+            # Until the EKF has an origin (set from this very message) the FC has no altitude to echo.
+            alt = ap.pos.alt_msl if ap.pos and ap.pos.lat != 0 else args.home_alt
+            ap.send_gps_input(st.lat, st.lon, alt, st.vn, st.ve,
                               hacc=st.sigma_m, sacc=st.vel_sigma, fix_type=3 if healthy else 0)
 
     threading.Thread(target=sender, daemon=True).start()
@@ -104,10 +105,9 @@ def cmd_run(args):
                 last_t = t
                 t_cap = t - args.latency
                 att, h = ap.attitude_at(t_cap), ap.height_agl()
-                if att is None or h is None or h < args.min_alt:
+                if att is None or h is None:
                     continue
-                with lock:
-                    fix = nav.process(frame, t_cap, att.roll, att.pitch, att.yaw, h)
+                fix = nav.process(frame, t_cap, att.roll, att.pitch, att.yaw, h)
                 if fix:
                     g2 = ap.gps_raw
                     out.writerow([f"{t_cap:.3f}", f"{fix.lat:.7f}", f"{fix.lon:.7f}", fix.inliers,
@@ -118,8 +118,9 @@ def cmd_run(args):
                 if t - last_status > 5:
                     last_status = t
                     st = nav.state(time.monotonic())
-                    ap.statustext(f"VNAV {'ok' if st and st.last_fix_age < 2 else 'NOFIX'} "
-                                  f"sig {st.sigma_m:.0f}m" if st else "VNAV waiting for first fix")
+                    mode = ("GND" if st.on_ground else "MAP" if st.last_fix_age < 2
+                            else "ODO" if st.last_update_age < 2 else "LOST")
+                    ap.statustext(f"VNAV {mode} sig {st.sigma_m:.0f}m")
         except KeyboardInterrupt:
             pass
         finally:
@@ -130,7 +131,7 @@ def cmd_run(args):
 
 # sim ------------------------------------------------------------------------
 def cmd_sim(args):
-    from .sim import fly_route, render
+    from .sim import SensorErrors, fly_route, render
 
     _, meta, map_ = load_bundle(args.bundle)
     world = load_world(args, map_)
@@ -140,17 +141,14 @@ def cmd_sim(args):
     # Start the filter from a deliberately wrong position to exercise acquisition.
     lon0, lat0, _ = GEOD.fwd(route[0][1], route[0][0], rng.uniform(0, 360), args.start_error)
     nav = build_navigator(args, meta, map_, cam, (lat0, lon0))
+    sensors = SensorErrors(rng, args.att_noise, args.yaw_noise, h_frac=args.alt_noise)
     errs, fixes, n, comp = [], 0, 0, []
     for pose in fly_route(map_, route, meta["mission"]["speed"], args.rate, rng):
         if args.frames and n >= args.frames:
             break
         n += 1
         img = render(world, cam, pose.lat, pose.lon, pose.h, pose.roll, pose.pitch, pose.yaw, rng)
-        # Sensor errors in what the navigator is told.
-        roll = pose.roll + math.radians(rng.normal(0, args.att_noise))
-        pitch = pose.pitch + math.radians(rng.normal(0, args.att_noise))
-        yaw = pose.yaw + math.radians(rng.normal(0, args.yaw_noise))
-        h = pose.h * (1 + rng.normal(0, args.alt_noise))
+        roll, pitch, yaw, h = sensors(pose.t, pose.roll, pose.pitch, pose.yaw, pose.h)
         t0 = time.perf_counter()
         fix = nav.process(img, pose.t, roll, pitch, yaw, h)
         comp.append(time.perf_counter() - t0)
@@ -193,7 +191,7 @@ def cmd_sim3d(args):
     cam = camera_from_args(args, meta)
     nav = build_navigator(args, meta, map_, cam)
     cfg = SimConfig(seed=args.seed, camera_hz=args.camera_hz, wind=(args.wind_e, args.wind_n),
-                    gust_sigma=args.gust)
+                    gust_sigma=args.gust, min_vision_alt=args.min_alt)
     sim = FlightSim(map_, cam, nav, meta, cfg, world=load_world(args, map_))
     feed = FlightFeed(sim.scene(), map_texture(map_))
     if args.port:
@@ -255,7 +253,10 @@ def main(argv=None):
         sp.add_argument("--features", default="orb", choices=["orb", "akaze", "sift"])
         sp.add_argument("--nfeatures", type=int, default=3000)
         sp.add_argument("--min-inliers", type=int, default=20)
-        sp.add_argument("--start-sigma", type=float, default=150.0, help="m, uncertainty of start position")
+        sp.add_argument("--start-sigma", type=float, default=5.0,
+                        help="m, uncertainty of the start position (vehicle placed at the mission home)")
+        sp.add_argument("--min-alt", type=float, default=25.0,
+                        help="m AGL below which frames are not matched to the map, only used for odometry")
         sp.add_argument("-v", "--verbose", action="store_true")
 
     def world_arg(sp):
@@ -268,10 +269,12 @@ def main(argv=None):
     r.add_argument("--baud", type=int, default=921600)
     r.add_argument("--camera", default="csi", help='"csi", "csi:N", V4L2 index, GStreamer pipeline, file, or "sitl"')
     r.add_argument("--start", help="lat,lon to start from (default: FC position, else mission home)")
-    r.add_argument("--gps-rate", type=float, default=5.0)
+    r.add_argument("--gps-rate", type=float, default=10.0, help="Hz of GPS_INPUT messages")
     r.add_argument("--latency", type=float, default=0.05, help="s from exposure to frame delivery")
-    r.add_argument("--min-alt", type=float, default=25.0, help="m AGL below which matching is skipped")
-    r.add_argument("--max-fix-age", type=float, default=4.0)
+    r.add_argument("--max-fix-age", type=float, default=4.0,
+                   help="s without a map fix, odometry or ground update before reporting no fix")
+    r.add_argument("--home-alt", type=float, default=0.0,
+                   help="m AMSL sent before the FC has an altitude of its own (sets the EKF origin height)")
     r.add_argument("--lost-sigma", type=float, default=60.0)
     r.set_defaults(func=cmd_run)
 
@@ -282,9 +285,10 @@ def main(argv=None):
     s.add_argument("--frames", type=int, default=0)
     s.add_argument("--seed", type=int, default=0)
     s.add_argument("--start-error", type=float, default=60.0, help="m offset of initial guess")
-    s.add_argument("--att-noise", type=float, default=1.0, help="deg roll/pitch error")
-    s.add_argument("--yaw-noise", type=float, default=3.0, help="deg heading error")
-    s.add_argument("--alt-noise", type=float, default=0.03, help="fractional height error")
+    s.set_defaults(start_sigma=150.0)
+    s.add_argument("--att-noise", type=float, default=1.0, help="deg roll/pitch error (slowly varying)")
+    s.add_argument("--yaw-noise", type=float, default=3.0, help="deg heading error (slowly varying)")
+    s.add_argument("--alt-noise", type=float, default=0.01, help="fractional height error")
     s.set_defaults(func=cmd_sim)
 
     u = sub.add_parser("upload", help="upload mission.waypoints to the FC")

@@ -82,6 +82,31 @@ def ground_homography(cam: CameraModel, roll, pitch, yaw, h: float) -> np.ndarra
     return np.diag([h, h, 1.0]) @ M
 
 
+def ground_patch(img: np.ndarray, cam: CameraModel, roll, pitch, yaw, h: float, gsd: float,
+                 size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """North-up square of the ground around where the optical axis meets it.
+
+    Args:
+        img: gray camera frame (undistorted).
+        gsd: metres per patch pixel.
+        size: patch side in pixels.
+
+    Returns:
+        (patch, valid mask, centre) where centre is the patch centre's
+        [north, east] offset in metres from the point below the camera.
+    """
+    G = ground_homography(cam, roll, pitch, yaw, h)
+    c = G @ np.array([cam.cx, cam.cy, 1.0])
+    centre = c[:2] / c[2]
+    P = np.array([[0, 1 / gsd, size / 2 - centre[1] / gsd],
+                  [-1 / gsd, 0, size / 2 + centre[0] / gsd],
+                  [0, 0, 1.0]])
+    M = P @ G
+    patch = cv2.warpPerspective(img, M, (size, size), flags=cv2.INTER_LINEAR)
+    mask = cv2.warpPerspective(np.full(img.shape, 255, np.uint8), M, (size, size), flags=cv2.INTER_NEAREST) > 0
+    return patch, mask, centre
+
+
 @dataclass
 class Ortho:
     image: np.ndarray       # north-up image on the map pixel grid

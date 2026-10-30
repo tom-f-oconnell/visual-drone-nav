@@ -57,6 +57,18 @@ def test_wpl_export():
     assert [int(ln.split("\t")[0]) for ln in lines[1:]] == list(range(7))
 
 
+def test_corridor_covers_return_leg():
+    from shapely.geometry import Point
+
+    from planner.mission import Mission
+
+    m = Mission.model_validate(mission())
+    poly, _ = m.corridor()
+    _, fwd, _ = m.route_utm()
+    home, last = m.waypoints[0], m.waypoints[-1]
+    assert poly.contains(Point(fwd.transform((home.lon + last.lon) / 2, (home.lat + last.lat) / 2)))
+
+
 def test_cache_and_export_then_fly(client, tmp_path):
     m = mission()
     chk = client.post("/api/plan/check", json=m).json()
@@ -89,14 +101,15 @@ def test_cache_and_export_then_fly(client, tmp_path):
     assert meta["map"]["coverage"] > 0.99
 
     from visnav.main import main
-    report = main(["sim", "--bundle", str(bundle), "--rate", "1", "--seed", "1"])
+    # Typical EKF3 roll/pitch error; at 120 m each degree moves fixes ~2 m (see README).
+    report = main(["sim", "--bundle", str(bundle), "--rate", "1", "--seed", "1", "--att-noise", "0.5"])
     assert report["fix_rate"] > 0.8, report
     assert report["err_median_m"] < 3.0, report
     assert report["err_p95_m"] < 8.0, report
 
 
 def test_closed_loop_flight_sim(client, tmp_path):
-    """The simulated vehicle flies a short mission on vision only and lands near home."""
+    """The simulated vehicle takes off, flies a short mission and lands on vision alone."""
     import json
 
     from visnav.flightsim import FlightSim, SimConfig, map_texture
@@ -120,13 +133,16 @@ def test_closed_loop_flight_sim(client, tmp_path):
     meta = json.loads((bundle / "mission.json").read_text())
     map_ = MapRaster.load(bundle / "map.tif")
     cam = CameraModel.from_hfov(960, 600, 90)
-    nav = Navigator(map_, cam, MapMatcher(map_, FeatureBackend("orb")), meta["home"]["lat"], meta["home"]["lon"])
-    sim = FlightSim(map_, cam, nav, meta, SimConfig(camera_hz=2.0, seed=5))
+    nav = Navigator(map_, cam, MapMatcher(map_, FeatureBackend("orb")), meta["home"]["lat"], meta["home"]["lon"],
+                    start_sigma_m=5.0)
+    sim = FlightSim(map_, cam, nav, meta, SimConfig(camera_hz=2.0, seed=5, att_noise_deg=0.5))
     records, summary = sim.run()
     assert summary["landed"], summary
     assert summary["fix_rate"] > 0.7, summary
     assert summary["ekf_err_median_m"] < 3.0, summary
-    assert summary["landing_error_m"] < 20.0, summary
+    # Below map-matching height only odometry runs: takeoff and landing.
+    assert summary["ekf_err_below_map_alt_max_m"] < 5.0, summary
+    assert summary["landing_error_m"] < 5.0, summary
     # Vehicle actually reached the far waypoint (it flew on the estimate, not truth).
     far = sim.plan[2]
     assert min(math.hypot(r["p"][0] - far[1], r["p"][1] - far[2]) for r in records) < 15

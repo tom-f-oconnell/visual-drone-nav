@@ -132,7 +132,7 @@ def mavlink_feed(ap, map_, feed: FlightFeed, origin, rate_hz: float = 5.0, stop:
     while not stop.is_set():
         time.sleep(1 / rate_hz)
         pos = ap.pos
-        if pos is None:
+        if pos is None or (pos.lat == 0 and pos.lon == 0):  # EKF has no origin yet
             continue
         att = ap.attitude_at(time.monotonic()) or (ap._att[-1] if ap._att else None)
         ex, ey = map_.ll_to_grid(pos.lat, pos.lon)

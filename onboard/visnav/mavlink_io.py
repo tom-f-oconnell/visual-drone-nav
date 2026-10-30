@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import bisect
 import logging
+import math
 import threading
 import time
 from collections import deque
@@ -127,20 +128,27 @@ class Autopilot:
 
     # Telemetry access ------------------------------------------------------
     def attitude_at(self, t: float) -> Attitude | None:
-        """Attitude sample closest to monotonic time t (frame capture time)."""
+        """Attitude at monotonic time t (frame capture time), interpolated between samples."""
         with self._lock:
             if not self._att:
                 return None
             i = bisect.bisect_left(self._att_t, t)
-            cands = [self._att[j] for j in (i - 1, i) if 0 <= j < len(self._att)]
-        best = min(cands, key=lambda a: abs(a.t - t))
-        return best if abs(best.t - t) < 0.1 else None
+            a, b = self._att[max(i - 1, 0)], self._att[min(i, len(self._att) - 1)]
+        if b.t - a.t > 0.1 or min(abs(a.t - t), abs(b.t - t)) > 0.1:
+            return None
+        if b.t <= a.t:
+            return a
+        f = min(max((t - a.t) / (b.t - a.t), 0.0), 1.0)
+        dyaw = (b.yaw - a.yaw + math.pi) % (2 * math.pi) - math.pi
+        return Attitude(t, a.roll + f * (b.roll - a.roll), a.pitch + f * (b.pitch - a.pitch), a.yaw + f * dyaw)
 
     def height_agl(self, max_age: float = 0.3) -> float | None:
         """Rangefinder if fresh, else altitude above home (assumes flat terrain)."""
         now = time.monotonic()
         if self.rangefinder and now - self.rangefinder[0] < max_age and self.rangefinder[1] > 1:
-            return self.rangefinder[1]
+            att = self._att[-1] if self._att else None
+            # A body-fixed downward lidar measures along its tilted axis.
+            return self.rangefinder[1] * (math.cos(att.roll) * math.cos(att.pitch) if att else 1.0)
         if self.pos and now - self.pos.t < 1.0:
             return self.pos.rel_alt
         return None
@@ -150,10 +158,12 @@ class Autopilot:
                        hacc: float, sacc: float, fix_type: int = 3, satellites: int = 12):
         week, week_ms = gps_time(time.time())
         flags = (mavlink.GPS_INPUT_IGNORE_FLAG_VDOP | mavlink.GPS_INPUT_IGNORE_FLAG_VEL_VERT)
+        # The EKF uses hacc; HDOP only gates arming (GPS_HDOP_GOOD, default 1.4), so
+        # scale it to mean "arm only if vision is better than ~7 m".
         self.conn.mav.gps_input_send(
             int(time.time() * 1e6), 0, flags, week_ms, week, fix_type,
             int(lat * 1e7), int(lon * 1e7), alt_msl,
-            max(hacc / 2.5, 0.5), 9.99,       # hdop, vdop
+            max(hacc / 5, 0.5), 9.99,       # hdop, vdop
             vn, ve, 0.0, sacc, hacc, max(hacc, 3.0), satellites)
 
     def statustext(self, text: str, severity: int = mavlink.MAV_SEVERITY_INFO):

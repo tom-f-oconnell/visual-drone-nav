@@ -64,16 +64,22 @@ class FrameGrabber:
 
 
 class SitlCamera:
-    """Renders frames from the map at the true SITL pose (SIMSTATE), for software-in-the-loop runs.
+    """Renders frames from the map at SITL's true position (SIMSTATE), for software-in-the-loop runs.
 
     Lets the whole run path (MAVLink in, GPS_INPUT out, EKF fusion) be exercised
-    in ArduPilot SITL with no camera: set SIM_GPS_DISABLE=1 mid-flight and watch
-    the vehicle keep flying the mission on vision alone.
+    in ArduPilot SITL with no camera. Frames are rendered with the attitude and
+    height visnav will be told for them, not SIMSTATE's true attitude: the two
+    arrive on different MAVLink streams, and their timing jitter alone (up to a
+    degree while yawing) would swamp odometry. `visnav sim3d` models attitude
+    errors instead.
     """
 
     def __init__(self, autopilot, map_, cam, rate_hz: float = 5.0):
         import numpy as np
 
+        from .sim import warm_up
+
+        warm_up()
         self.ap, self.map, self.cam, self.period = autopilot, map_, cam, 1 / rate_hz
         self.rng = np.random.default_rng()
         self._last = 0.0
@@ -84,13 +90,14 @@ class SitlCamera:
         wait = self._last + self.period - time.monotonic()
         if wait > 0:
             time.sleep(wait)
-        st, pos = self.ap.simstate, self.ap.pos
-        if st is None or pos is None:
+        st, h = self.ap.simstate, self.ap.height_agl()
+        att = self.ap.attitude_at(st[0]) if st else None
+        if att is None or h is None:
             time.sleep(0.1)
             return None, 0.0
         t, s = st
-        frame = render(self.map, self.cam, s.lat / 1e7, s.lng / 1e7, max(pos.rel_alt, 1.0),
-                       s.roll, s.pitch, s.yaw, self.rng)
+        frame = render(self.map, self.cam, s.lat / 1e7, s.lng / 1e7, max(h, 0.3), att.roll, att.pitch, att.yaw,
+                       self.rng)
         self._last = time.monotonic()
         return frame, t
 

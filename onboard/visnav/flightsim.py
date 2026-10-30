@@ -29,7 +29,7 @@ import numpy as np
 from .geo import MapRaster
 from .navigator import Navigator
 from .ortho import CameraModel
-from .sim import render
+from .sim import SensorErrors, render, warm_up
 
 G = 9.81
 
@@ -49,11 +49,12 @@ class SimConfig:
     drag: float = 0.35                         # 1/s, linear drag against air
     accel_noise: float = 0.15                  # m/s^2 white noise on IMU
     accel_bias: float = 0.08                   # m/s^2 constant bias per axis
-    att_noise_deg: float = 1.0
+    att_noise_deg: float = 1.0                 # slowly varying AHRS errors (see sim.SensorErrors)
     yaw_noise_deg: float = 3.0
-    alt_noise_m: float = 1.0
-    min_vision_alt: float = 25.0
-    max_fix_age: float = 4.0
+    alt_noise_frac: float = 0.01
+    min_vision_alt: float = 25.0               # map matching only above this; odometry below
+    max_update_age: float = 4.0
+    lost_sigma: float = 60.0
     thumb_every_s: float = 1.0
     record_hz: float = 5.0
     max_time: float = 1800.0
@@ -107,6 +108,7 @@ class FlightSim:
     def __post_init__(self):
         if self.world is None:
             self.world = self.map
+        warm_up()
         h, w = self.map.shape
         self.origin = np.array(self.map.px_to_grid(w / 2, h / 2))
         self.rng = np.random.default_rng(self.cfg.seed)
@@ -123,6 +125,8 @@ class FlightSim:
         self.truth = Truth(np.array([self.home[0], self.home[1], 0.0]), np.zeros(3))
         self.ekf = [AxisEKF(self.home[0], self.cfg.accel_noise * 3), AxisEKF(self.home[1], self.cfg.accel_noise * 3)]
         self.bias = self.rng.normal(0, self.cfg.accel_bias, 2)
+        self.sensors = SensorErrors(self.rng, self.cfg.att_noise_deg, self.cfg.yaw_noise_deg,
+                                    h_frac=self.cfg.alt_noise_frac)
         self.gust = np.zeros(2)
         self.t = 0.0
         self.leg = 0
@@ -225,7 +229,7 @@ class FlightSim:
         dt = 1 / cfg.physics_hz
         next_cam = next_gps = next_rec = next_thumb = 0.0
         records, fixes, thumb = [], 0, None
-        frames = 0
+        frames = map_frames = 0
         last_fix = None
         while not self.landed and self.t < cfg.max_time:
             est_p = np.array([self.ekf[0].x[0], self.ekf[1].x[0]])
@@ -239,20 +243,18 @@ class FlightSim:
             tr = self.truth
             if self.t >= next_cam:
                 next_cam += 1 / cfg.camera_hz
-                if tr.p[2] >= cfg.min_vision_alt:
+                img = None
+                if tr.p[2] > 0.3:  # on the ground the camera sees only the landing gear's shadow
                     lat, lon = self._local_to_ll(tr.p[0], tr.p[1])
                     img = render(self.world, self.cam, lat, lon, tr.p[2], tr.roll, tr.pitch, tr.yaw, self.rng)
                     frames += 1
-                    fix = self.nav.process(
-                        img, self.t,
-                        tr.roll + math.radians(self.rng.normal(0, cfg.att_noise_deg)),
-                        tr.pitch + math.radians(self.rng.normal(0, cfg.att_noise_deg)),
-                        tr.yaw + math.radians(self.rng.normal(0, cfg.yaw_noise_deg)),
-                        tr.p[2] + self.rng.normal(0, cfg.alt_noise_m))
-                    if fix:
-                        fixes += 1
-                        last_fix = self._ll_to_local(fix.lat, fix.lon).tolist() + [fix.inliers]
-                    if self.t >= next_thumb:
+                    map_frames += int(tr.p[2] >= cfg.min_vision_alt)
+                roll, pitch, yaw, h = self.sensors(self.t, tr.roll, tr.pitch, tr.yaw, tr.p[2])
+                fix = self.nav.process(img, self.t, roll, pitch, yaw, max(h, 0.0))
+                if fix:
+                    fixes += 1
+                    last_fix = self._ll_to_local(fix.lat, fix.lon).tolist() + [fix.inliers]
+                if img is not None and self.t >= next_thumb:
                         next_thumb += cfg.thumb_every_s
                         small = cv2.resize(img, (192, int(192 * img.shape[0] / img.shape[1])), interpolation=cv2.INTER_AREA)
                         thumb = base64.b64encode(cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 70])[1]).decode()
@@ -260,7 +262,8 @@ class FlightSim:
             if self.t >= next_gps:
                 next_gps += 1 / cfg.gps_rate_hz
                 st = self.nav.state(self.t)
-                if st and st.last_fix_age < cfg.max_fix_age:
+                if st and st.last_update_age < cfg.max_update_age and st.sigma_m < cfg.lost_sigma:
+                    # Position only, as ArduPilot is set up (EK3_SRC1_VELXY 0): velocity comes from the IMU.
                     x, y = self._ll_to_local(st.lat, st.lon)
                     for i, z in enumerate((x, y)):
                         self.ekf[i].update_pos(z, max(st.sigma_m, 1.0))
@@ -288,14 +291,18 @@ class FlightSim:
             if on_progress and int(self.t * cfg.physics_hz) % int(10 * cfg.physics_hz) == 0:
                 on_progress(self.t)
 
-        errs = np.array([math.hypot(r["p"][0] - r["ekf"][0], r["p"][1] - r["ekf"][1]) for r in records
-                         if r["p"][2] > cfg.min_vision_alt])
+        def err(low, high):
+            return np.array([math.hypot(r["p"][0] - r["ekf"][0], r["p"][1] - r["ekf"][1]) for r in records
+                             if low < r["p"][2] <= high])
+
+        errs, low = err(0.3, np.inf), err(0.3, cfg.min_vision_alt)
         summary = {
             "duration_s": round(self.t, 1), "landed": self.landed, "camera_frames": frames,
-            "vision_fixes": fixes, "fix_rate": round(fixes / max(frames, 1), 3),
+            "vision_fixes": fixes, "fix_rate": round(fixes / max(map_frames, 1), 3),
             "ekf_err_median_m": round(float(np.median(errs)), 2) if len(errs) else None,
             "ekf_err_p95_m": round(float(np.percentile(errs, 95)), 2) if len(errs) else None,
             "ekf_err_max_m": round(float(errs.max()), 2) if len(errs) else None,
+            "ekf_err_below_map_alt_max_m": round(float(low.max()), 2) if len(low) else None,
             "landing_error_m": round(float(np.linalg.norm(self.truth.p[:2] - np.array(self.plan[-1][1:3]))), 2),
         }
         return records, summary

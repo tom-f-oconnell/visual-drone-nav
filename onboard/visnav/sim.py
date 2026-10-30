@@ -3,11 +3,14 @@
 `render` produces what the downward camera would see at a given pose by
 projecting the map through the inverse of the orthorectification. Photometric
 changes (gamma, colour cast, blur, noise) stand in for season, lighting and
-sensor differences between the NAIP flight and today.
+sensor differences between the NAIP flight and today. Below the map's
+resolution a procedural ground texture, fixed to the ground, stands in for the
+grass and gravel a real camera sees low down, so odometry has something to track.
 """
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass
 
@@ -21,14 +24,60 @@ from .geo import MapRaster
 from .ortho import CameraModel, ground_homography
 
 
+DETAIL_GSD = 0.02  # m per pixel of the procedural ground texture
+DETAIL_LEVELS = 6
+
+
+@functools.cache
+def _detail_spectrum(size: int = 1024, seed: int = 7) -> np.ndarray:
+    f = np.random.default_rng(seed).normal(size=(size, size))
+    fy, fx = np.meshgrid(np.fft.fftfreq(size), np.fft.fftfreq(size), indexing="ij")
+    wavelength_m = DETAIL_GSD / np.maximum(np.hypot(fx, fy), 1e-9)
+    band = (wavelength_m > 0.05) & (wavelength_m < 1.0)
+    F = np.fft.fft2(f) * band / np.maximum(np.hypot(fx, fy), 1e-3)
+    return F / np.real(np.fft.ifft2(F)).std()
+
+
+@functools.cache
+def detail_tile(level: int = 0) -> np.ndarray:
+    """Periodic ground texture (features ~5 cm to 1 m) at DETAIL_GSD * 2**level m per pixel.
+
+    Coarser levels keep only the wavelengths they can represent, like a
+    mipmap, so a high camera sees the texture averaged rather than aliased.
+    """
+    F = np.fft.fftshift(_detail_spectrum())
+    n, c = F.shape[0] >> level, F.shape[0] // 2
+    crop = np.fft.ifftshift(F[c - n // 2:c + n // 2, c - n // 2:c + n // 2])
+    return (np.real(np.fft.ifft2(crop)) / 4 ** level).astype(np.float32)
+
+
+def warm_up():
+    """Build every texture level now; doing it on first use stalls a real-time loop for seconds."""
+    for level in range(DETAIL_LEVELS):
+        detail_tile(level)
+
+
 def render(map_: MapRaster, cam: CameraModel, lat, lon, h, roll, pitch, yaw,
-           rng: np.random.Generator | None = None, photometric: bool = True) -> np.ndarray:
+           rng: np.random.Generator | None = None, photometric: bool = True, detail: float = 0.12) -> np.ndarray:
+    """Camera frame (BGR) at a pose; detail is the contrast of the procedural ground texture."""
     J = map_.ned_to_px_jacobian(lat, lon)
     col, row = map_.ll_to_px(lat, lon)
     A = np.array([[J[0, 0], J[0, 1], col], [J[1, 0], J[1, 1], row], [0, 0, 1.0]])
     H = A @ ground_homography(cam, roll, pitch, yaw, h)
     bgr = cv2.cvtColor(map_.rgb, cv2.COLOR_RGB2BGR)
     img = cv2.warpPerspective(bgr, H, (cam.width, cam.height), flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
+    if detail:
+        # Same map pixel -> texture pixel mapping every frame, so the texture is fixed to the ground.
+        level = max(0, min(DETAIL_LEVELS - 1, int(math.log2(max(h / cam.fx / DETAIL_GSD, 1.0)))))
+        tile = detail_tile(level)
+        k, n = map_.gsd / (DETAIL_GSD * 2 ** level), tile.shape[0]
+        M = np.diag([k, k, 1.0]) @ H
+        # warpPerspective works in 16-bit coordinates: shift by whole tile periods to stay near 0.
+        c = M @ [cam.cx, cam.cy, 1.0]
+        M = np.array([[1, 0, -(c[0] / c[2] // n) * n], [0, 1, -(c[1] / c[2] // n) * n], [0, 0, 1.0]]) @ M
+        tex = cv2.warpPerspective(tile, M, (cam.width, cam.height),
+                                  flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
+        img = np.clip(img * (1 + detail * tex[..., None]), 0, 255).astype(np.uint8)
     if photometric:
         rng = rng or np.random.default_rng()
         f = img.astype(np.float32) / 255
@@ -38,6 +87,33 @@ def render(map_: MapRaster, cam: CameraModel, lat, lon, h, roll, pitch, yaw,
         f += rng.normal(0, 0.02, f.shape)
         img = np.clip(f * 255, 0, 255).astype(np.uint8)
     return img
+
+
+class SensorErrors:
+    """Errors in the attitude, heading and height the navigator is told.
+
+    An autopilot's attitude and heading errors drift slowly rather than jumping
+    every frame, so they are first-order Gauss-Markov processes plus a little
+    white noise. Height error grows with height, like a lidar rangefinder's.
+    """
+
+    def __init__(self, rng: np.random.Generator, att_deg: float = 1.0, yaw_deg: float = 3.0,
+                 tau_s: float = 20.0, white_deg: float = 0.1, h_min: float = 0.05, h_frac: float = 0.01):
+        self.rng = rng
+        self.sigma = np.radians([att_deg, att_deg, yaw_deg])
+        self.tau, self.white = tau_s, math.radians(white_deg)
+        self.h_min, self.h_frac = h_min, h_frac
+        self.bias = rng.normal(0, self.sigma)
+        self.t = None
+
+    def __call__(self, t: float, roll: float, pitch: float, yaw: float, h: float):
+        """Measured (roll, pitch, yaw, h) at time t for the true values."""
+        if self.t is not None:
+            a = math.exp(-max(t - self.t, 0.0) / self.tau)
+            self.bias = self.bias * a + self.rng.normal(0, self.sigma * math.sqrt(1 - a * a))
+        self.t = t
+        r, p, y = np.array([roll, pitch, yaw]) + self.bias + self.rng.normal(0, self.white, 3)
+        return float(r), float(p), float(y), h + self.rng.normal(0, self.h_min + self.h_frac * abs(h))
 
 
 @dataclass

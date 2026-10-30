@@ -1,7 +1,8 @@
 # ArduCopter parameters for vision-as-GPS via MAVLink GPS_INPUT.
-# Written for ArduPilot 4.5/4.6. Names changed across versions (GPS_TYPE became
-# GPS1_TYPE in 4.6): check each one in Mission Planner's full parameter list
-# before loading, and test in SITL before flight.
+# Every name checked against ArduCopter 4.7.2 SITL. Names changed across
+# versions (GPS_TYPE became GPS1_TYPE in 4.6, RNGFND1_MAX_CM became RNGFND1_MAX
+# in metres): check each one in Mission Planner's full parameter list before
+# loading on older firmware.
 
 # Jetson on TELEM2 (SERIAL2): MAVLink2 at 921600 baud.
 SERIAL2_PROTOCOL 2
@@ -12,22 +13,30 @@ GPS1_TYPE 14
 GPS2_TYPE 1
 GPS_AUTO_SWITCH 0
 GPS_PRIMARY 0
-# Latency from exposure to GPS_INPUT arrival (matching + filter), ms.
-GPS1_DELAY_MS 150
+# visnav predicts its position to the moment it sends GPS_INPUT, so the EKF
+# should assume almost no delay. Not 0: that means the 200 ms driver default.
+# (With 150 the EKF ran ~2.8 m ahead of truth in SITL at 10 m/s.)
+GPS1_DELAY_MS 10
 
-# EKF3: horizontal position and velocity from "GPS" (vision), height from baro, yaw from compass.
+# EKF3: horizontal position from "GPS" (vision), height from baro, yaw from compass.
+# Velocity comes from the IMU, not from visnav: odometry at cruise height is too
+# noisy to track accelerations, and fusing it tripped the EKF failsafe in SITL.
+# The GSF yaw estimator needs real GNSS velocity, so it must not reset yaw.
 EK3_SRC1_POSXY 3
-EK3_SRC1_VELXY 3
+EK3_SRC1_VELXY 0
+EK3_GSF_USE_MASK 0
 EK3_SRC1_POSZ 1
 EK3_SRC1_VELZ 0
 EK3_SRC1_YAW 1
 # Vision fixes do not carry real satellite quality data; relax the GPS pre-arm quality checks.
 EK3_GPS_CHECK 0
 
-# Downward rangefinder improves orthorectification scale (example: Benewake TF02 on SERIAL4).
-RNGFND1_TYPE 20
+# Downward rangefinder improves orthorectification scale. It must reach cruise
+# height to help (vision only locks above ~65 m), so a long range lidar, e.g. a
+# Benewake TF03 (100 or 180 m variants) on SERIAL4. Type 19 is the TF02 (22 m).
+RNGFND1_TYPE 27
 RNGFND1_ORIENT 25
-RNGFND1_MAX_CM 2200
+RNGFND1_MAX 180
 SERIAL4_PROTOCOL 9
 
 # If vision is lost the EKF reports bad position: land rather than drift.

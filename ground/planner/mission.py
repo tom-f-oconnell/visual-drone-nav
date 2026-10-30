@@ -81,10 +81,15 @@ class Mission(BaseModel):
         return utm_epsg(wp.lat, wp.lon)
 
     def route_utm(self):
-        """Route as a shapely geometry in the mission UTM zone, plus the transformers."""
+        """Route as a shapely geometry in the mission UTM zone, plus the transformers.
+
+        With end_action "rtl" the route closes back to home (the first
+        waypoint), because the vehicle flies that leg too and needs imagery there.
+        """
         fwd = Transformer.from_crs(4326, self.epsg, always_xy=True)
         inv = Transformer.from_crs(self.epsg, 4326, always_xy=True)
-        pts = [fwd.transform(w.lon, w.lat) for w in self.waypoints]
+        wps = self.waypoints + (self.waypoints[:1] if self.end_action == "rtl" and len(self.waypoints) > 2 else [])
+        pts = [fwd.transform(w.lon, w.lat) for w in wps]
         geom = Point(pts[0]) if len(pts) == 1 else LineString(pts)
         return geom, fwd, inv
 

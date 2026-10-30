@@ -60,30 +60,32 @@ visnav run    --bundle ~/missions/mission1 --mavlink /dev/ttyTHS1 --camera csi -
 visnav sim    --bundle ~/missions/mission1        # bench test: synthetic flight, prints error stats
 ```
 
+Place the vehicle at the mission home (the first waypoint) before power on:
+the navigator starts there (`--start lat,lon` and `--start-sigma` otherwise), so
+ArduPilot has a position to arm with and no GNSS is needed at any point. On the
+ground it holds that position; from about 1 m up, frame-to-frame visual
+odometry from the same camera tracks the vehicle through takeoff, landing and
+gaps between map fixes; above `--min-alt` (25 m) frames are also matched to the
+NAIP map. Set `--home-alt` to the launch site's elevation (m AMSL) so the EKF
+origin has the right height.
+
 `run` writes `visnav_<time>.csv` in the bundle with every fix, the FC position
 and the real GPS (if fitted as GPS2), so flights can be scored afterwards.
 
 Calibrate the camera with OpenCV's chessboard calibration and write the
 intrinsics in the format of `camera.example.json`. Without `--calib` the
-navigator assumes an ideal lens with the mission's HFOV.
+navigator assumes an ideal lens with the mission's HFOV. Mount the camera
+square to the flight controller and measure any tilt: at 120 m each degree of
+attitude or camera mount error moves map fixes by about 2 m. Frames and
+attitude must be time-matched within a few ms (`--latency`).
 
 ### ArduPilot setup
 
-Load `docs/ardupilot_visnav.parm` after checking each name against your firmware
-version. In short: Jetson on TELEM2 at 921600, `GPS1_TYPE=14` (MAVLink GPS), EKF3
-position from GPS, height from baro, yaw from compass, a downward rangefinder,
-and a real GPS on GPS2 for comparison only.
-
-### Testing in ArduPilot SITL (not yet run; written for it)
-
-```bash
-sim_vehicle.py -v ArduCopter --custom-location=<home lat>,<home lon>,<alt>,0 --out=udp:127.0.0.1:14550
-# in MAVProxy: param set GPS1_TYPE 14 ... (as in the .parm file, GPS2 = SITL GPS)
-visnav run --bundle <bundle> --mavlink udpin:127.0.0.1:14550 --camera sitl
-```
-
-`--camera sitl` renders camera frames from the map at SITL's true pose, so the
-whole loop (MAVLink in, GPS_INPUT out, EKF fusion) runs without hardware.
+Load `docs/ardupilot_visnav.parm` (checked against ArduCopter 4.7.2). In short:
+Jetson on TELEM2 at 921600, `GPS1_TYPE=14` (MAVLink GPS), EKF3 horizontal
+position only from that GPS (velocity from the IMU), height from baro, yaw from
+compass, a long-range downward lidar, and a real GPS on GPS2 for comparison
+only. [design.md](design.md) explains each choice.
 
 ## Flight simulator and 3D viewer
 
@@ -99,7 +101,9 @@ visnav sim3d --bundle ~/missions/mission1 --port 0 --export flight.html --exit
   flies takeoff, every waypoint and the RTL or land at the end.
 * Camera frames are rendered from the bundle's NAIP map at the true pose and
   passed, with attitude, heading and height errors, through the real visnav
-  navigator.
+  navigator. Those errors drift slowly, as an autopilot's do, rather than
+  jumping every frame. Below NAIP's resolution a procedural ground texture,
+  fixed to the ground, stands in for what a real camera sees low down.
 * Its output feeds a stand-in for ArduPilot's EKF (per-axis position, velocity
   and accelerometer bias, driven by a noisy, biased IMU). **The controller only
   sees that estimate**, so navigation error moves the real vehicle, as in flight.
@@ -131,32 +135,45 @@ visnav view --bundle ~/missions/mission1 --mavlink udpin:0.0.0.0:14551
 
 With SITL, the white path is the simulator's truth (SIMSTATE) and the blue path
 is ArduPilot's EKF. On a real vehicle the reference is the GNSS on GPS2, if fitted.
-`visnav view` was tested against a fake MAVLink autopilot only, not SITL.
 
 The built-in model is a simplified stand-in, not ArduPilot: no motor or
 battery model, no ArduPilot control code, and a simple per-axis Kalman filter
 instead of EKF3. Use it to tune matching and see failure modes quickly; use SITL
 to check the autopilot integration.
 
-## How the matching works
-
-1. Ray-cast the four image corners through the camera model and the vehicle
-   attitude onto a flat ground plane at the measured height. That gives a
-   homography that warps the frame to north-up at the map's 0.6 m/px, with grid
-   convergence and the UTM scale factor folded in.
-2. Crop the NAIP mosaic around the filter's predicted position (radius from its
-   uncertainty, 40 to 400 m).
-3. ORB features (AKAZE and SIFT also available), ratio test, RANSAC similarity
-   fit. Reject fits with scale outside 0.8 to 1.25 or rotation over 30°.
-4. The pixel under the camera maps to lat/lon. A constant-velocity Kalman filter
-   gates outliers (chi-square 99.9%) and re-locks after repeated strong
-   disagreements.
-
-## Tests
+## Development
 
 ```bash
 python3 -m venv venv && . venv/bin/activate
 pip install -r ground/requirements.txt pymavlink pytest
+pip install -e ground -e onboard --no-deps
+```
+
+[design.md](design.md) covers how the navigation works, why ArduPilot is set
+up as it is, how far the simulators can be trusted, measured results and known
+limits.
+
+Fly a bundle in ArduCopter SITL, GNSS-denied from power on, with the prebuilt
+SITL binary from `firmware.ardupilot.org/Copter/stable/SITL_x86_64_linux_gnu/`
+and the matching `Tools/autotest/default_params/copter.parm`:
+
+```bash
+python tools/sitl_flight.py --bundle ~/missions/mission1 --arducopter ./arducopter \
+    --defaults copter.parm --out sitl_out          # prints errors against SITL truth
+```
+
+Compare map matchers across NAIP years on 12 sites (`pip install torch kornia`
+for the LightGlue matchers):
+
+```bash
+python bench/fetch_sites.py DATA
+python bench/match_bench.py DATA OUT --matchers orb corr lg:features=aliked
+python bench/report.py OUT
+```
+
+Tests:
+
+```bash
 pytest tests
 ```
 
@@ -168,33 +185,9 @@ pytest tests
   controller over UDP, and checks the 3D viewer can follow it.
 * `test_naip.py` checks cached cells land exactly on the UTM grid, including
   when read from a COG overview.
+* `test_odometry.py` checks odometry against known moves from 2 to 120 m, the
+  navigator's position on the ground before any fix, and the fix-bias model.
 
 The tests use a procedurally generated stand-in for NAIP, so they run offline.
 To run the same test on real imagery, download NAIP GeoTIFFs and set
 `NAIPNAV_TEST_NAIP=<dir> NAIPNAV_TEST_LAT=<lat> NAIPNAV_TEST_LON=<lon>`.
-
-## Known limits and next steps
-
-* **Matching across NAIP years is the main open problem.** With real NAIP at
-  three sites (Boulder foothills, east Boulder County farms and suburbs, central
-  Iowa row crops), a 2021 map and camera frames rendered from 2023 imagery
-  (`--world`), ORB found the right place in 0 to 50% of frames even given the
-  true position, and the closed-loop sim diverged (median error 11 to 245 m, or
-  no lock at all). The same flights over the map's own imagery gave 2 to 3 m.
-  Area correlation of gradient orientations at 2.4 m/px did better in a quick
-  test (82% vs 50% in the foothills) but needs a confidence measure that rejects
-  wrong peaks over farmland. A learned matcher (SuperPoint + LightGlue under
-  TensorRT on the Jetson) is the other route; `FeatureBackend` is the seam.
-* No position is sent until vision locks (about 65 m AGL with a 90° lens), so
-  ArduPilot cannot arm in AUTO, or hold position low on takeoff and landing, on
-  vision alone. A seeded position on the ground (the bundle's home) or a real
-  GPS below lock height is needed.
-* Flat-terrain assumption. In hilly areas, use the rangefinder or add a DEM
-  (Copernicus 30 m) to get height above the ground under the camera.
-* NAIP is flown every 2 to 3 years in summer. Snow, harvest and new construction
-  reduce matches further.
-* Over water, forest canopy or uniform fields there may be no fixes. Plan routes
-  over textured ground, and keep the corridor wide enough for drift.
-* GPS_INPUT reuses ArduPilot's GPS path, which is the simplest integration.
-  For tighter fusion, send `ODOMETRY` / `VISION_POSITION_ESTIMATE` with
-  `EK3_SRC1_POSXY=6` instead.
