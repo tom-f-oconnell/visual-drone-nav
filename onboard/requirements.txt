@@ -1,0 +1,7 @@
+# On a Jetson, use the OpenCV that ships with JetPack (built with GStreamer for CSI
+# cameras). Do not pip-install opencv-python over it; drop that line below.
+numpy>=1.24
+opencv-python-headless>=4.8
+rasterio>=1.3.9
+pyproj>=3.6
+pymavlink>=2.4.40

@@ -1,0 +1,418 @@
+<title>NAIP Flight Sim</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: full-bleed 3D scene; instrument panels float over it, top-left status, bottom transport bar. Single dark look by design. */
+:root {
+  color-scheme: dark;
+  --bg: #0f1412; --panel: rgba(16, 22, 20, 0.86); --line: #2f3a36; --fg: #e4ebe7; --muted: #8fa09a;
+  --truth: #f2f2ee; --est: #3fc1d9; --fix: #f0a04b; --plan: #b7e07a; --ok: #6fd08c; --warn: #f0a04b; --bad: #ef6b5b;
+  --sans: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+html, body { height: 100%; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.45 var(--sans); overflow: hidden; }
+#gl { position: fixed; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; }
+.panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; backdrop-filter: blur(6px); }
+#status { top: calc(12px + env(safe-area-inset-top, 0px)); left: max(12px, env(safe-area-inset-left, 0px)); width: 268px; padding: 12px 14px; display: grid; gap: 10px; }
+#status h1 { margin: 0; font-size: 14px; font-weight: 600; }
+#status h1 small { display: block; color: var(--muted); font: 11px var(--mono); font-weight: 400; margin-top: 2px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font: 500 11px var(--mono); letter-spacing: .06em; text-transform: uppercase; padding: 3px 8px; border-radius: 3px; border: 1px solid currentColor; justify-self: start; }
+.chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.chip.ok { color: var(--ok); } .chip.warn { color: var(--warn); } .chip.idle { color: var(--muted); }
+dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-variant-numeric: tabular-nums; }
+dt { color: var(--muted); } dd { margin: 0; text-align: right; font-family: var(--mono); font-size: 12px; }
+#spark { width: 100%; height: 54px; display: block; }
+.sparkcap { display: flex; justify-content: space-between; color: var(--muted); font: 10.5px var(--mono); margin-top: 2px; }
+#thumbwrap { display: grid; gap: 4px; }
+#thumb { width: 100%; aspect-ratio: 192 / 120; background: #000; border-radius: 3px; object-fit: cover; }
+#thumbwrap span { color: var(--muted); font: 10.5px var(--mono); }
+#legend { top: calc(12px + env(safe-area-inset-top, 0px)); right: max(12px, env(safe-area-inset-right, 0px)); padding: 10px 12px; display: grid; gap: 5px; font-size: 12px; }
+#legend i { display: inline-block; width: 18px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: 8px; }
+#legend .views { display: flex; gap: 4px; margin-top: 6px; }
+button { font: 500 12px var(--sans); color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 5px 9px; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--est); outline-offset: 2px; }
+#transport { left: 50%; transform: translateX(-50%); bottom: calc(12px + env(safe-area-inset-bottom, 0px)); width: min(760px, calc(100% - 24px)); padding: 8px 12px; display: flex; align-items: center; gap: 10px; }
+#play { width: 64px; }
+#scrub { flex: 1; min-width: 0; accent-color: var(--est); }
+#clock { font: 12px var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+#speed { display: flex; gap: 3px; }
+#loading { position: fixed; inset: 0; display: grid; place-items: center; color: var(--muted); font: 13px var(--mono); }
+@media (max-width: 720px) {
+  #status { width: auto; right: max(12px, env(safe-area-inset-right, 0px)); grid-template-columns: 1fr 1fr; }
+  #status h1, #status .chip, #sparkbox { grid-column: 1 / -1; }
+  #thumbwrap { display: none; }
+  #legend { display: none; }
+  #speed button:nth-child(n+3) { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<canvas id="gl"></canvas>
+<div id="loading">Loading flight…</div>
+
+<section id="status" class="panel" aria-live="polite">
+  <h1 id="title">Flight<small id="subtitle">GPS denied · vision navigation</small></h1>
+  <span id="navchip" class="chip idle">waiting</span>
+  <dl>
+    <dt>Altitude</dt><dd id="alt">–</dd>
+    <dt>Ground speed</dt><dd id="spd">–</dd>
+    <dt>Heading</dt><dd id="hdg">–</dd>
+    <dt>Position error</dt><dd id="err">–</dd>
+    <dt>Leg</dt><dd id="leg">–</dd>
+  </dl>
+  <div id="sparkbox">
+    <canvas id="spark"></canvas>
+    <div class="sparkcap"><span>estimate error, m</span><span id="sparkmax"></span></div>
+  </div>
+  <div id="thumbwrap"><img id="thumb" alt="Simulated downward camera frame"><span>downward camera</span></div>
+</section>
+
+<aside id="legend" class="panel">
+  <div><i style="border-color: var(--truth)"></i>true path</div>
+  <div><i style="border-color: var(--est)"></i>autopilot estimate</div>
+  <div><i style="border-color: var(--fix); border-top-style: dotted"></i>vision fixes</div>
+  <div><i style="border-color: var(--plan); border-top-style: dashed"></i>mission plan</div>
+  <div class="views" role="group" aria-label="Camera view">
+    <button id="v-orbit" aria-pressed="true">Orbit</button>
+    <button id="v-chase" aria-pressed="false">Chase</button>
+    <button id="v-top" aria-pressed="false">Top</button>
+  </div>
+</aside>
+
+<div id="transport" class="panel">
+  <button id="play">Pause</button>
+  <input id="scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Flight time">
+  <span id="clock">0:00 / 0:00</span>
+  <div id="speed" role="group" aria-label="Playback speed">
+    <button data-s="1" aria-pressed="false">1×</button>
+    <button data-s="4" aria-pressed="false">4×</button>
+    <button data-s="16" aria-pressed="true">16×</button>
+  </div>
+</div>
+
+<script src="__THREE_SRC__"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+// Data: embedded (exported page) or live from `visnav sim3d` / `visnav view`.
+const DATA = window.NAVSIM || null;
+let scene3, records = [], live = false;
+
+async function boot() {
+  let sceneInfo, mapUrl;
+  if (DATA) {
+    sceneInfo = DATA.scene; records = DATA.records; mapUrl = DATA.map;
+  } else {
+    sceneInfo = await (await fetch("scene.json")).json();
+    mapUrl = "map.jpg";
+    live = true;
+  }
+  build(sceneInfo, mapUrl);
+  if (live) {
+    const es = new EventSource("events");
+    es.onmessage = (e) => { const r = JSON.parse(e.data); records.push(r); onNewRecord(); };
+    es.addEventListener("done", () => { live = false; es.close(); onNewRecord(); });
+  }
+  $("loading").hidden = true;
+  onNewRecord();
+  requestAnimationFrame(loop);
+}
+
+// ---------- Three.js scene ----------
+const renderer = new THREE.WebGLRenderer({ canvas: $("gl"), antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const world = new THREE.Scene();
+world.background = new THREE.Color(css("--bg"));
+world.fog = new THREE.Fog(css("--bg"), 3000, 9000);
+const camera = new THREE.PerspectiveCamera(45, 1, 1, 20000);
+world.add(new THREE.HemisphereLight(0xffffff, 0x334433, 1.0));
+const sun = new THREE.DirectionalLight(0xffffff, 0.6); sun.position.set(300, 800, 200); world.add(sun);
+
+// ENU metres -> three: x = east, y = up, z = -north
+const V = (e, n, u) => new THREE.Vector3(e, u, -n);
+let drone, truthLine, estLine, fixPts, footprint, frustum, dropLine, S;
+const MAXP = 20000;
+
+function lineGeom(n) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+  g.setDrawRange(0, 0);
+  return g;
+}
+
+function build(info, mapUrl) {
+  S = info;
+  $("title").firstChild.textContent = info.name;
+  const [w, s, e, n] = info.extent;
+  const tex = new THREE.TextureLoader().load(mapUrl);
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(e - w, n - s), new THREE.MeshBasicMaterial({ map: tex }));
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.set((w + e) / 2, 0, -(s + n) / 2);
+  world.add(ground);
+  const grid = new THREE.GridHelper(Math.max(e - w, n - s) * 1.6, 32, 0x2f3a36, 0x1d2522);
+  grid.position.set((w + e) / 2, -0.5, -(s + n) / 2);
+  world.add(grid);
+
+  // Mission plan: path at altitude, poles to the ground, numbered markers.
+  const planC = new THREE.Color(css("--plan"));
+  const pts = [V(info.home[0], info.home[1], 0)];
+  info.plan.forEach((p) => pts.push(V(p.x, p.y, p.alt)));
+  const plan = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+    new THREE.LineDashedMaterial({ color: planC, dashSize: 12, gapSize: 8 }));
+  plan.computeLineDistances(); world.add(plan);
+  info.plan.forEach((p, i) => {
+    if (p.kind !== "wp") return;
+    const pole = new THREE.Line(new THREE.BufferGeometry().setFromPoints([V(p.x, p.y, 0), V(p.x, p.y, p.alt)]),
+      new THREE.LineBasicMaterial({ color: planC, transparent: true, opacity: 0.45 }));
+    world.add(pole);
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(4, 16, 12), new THREE.MeshBasicMaterial({ color: planC }));
+    ball.position.copy(V(p.x, p.y, p.alt)); world.add(ball);
+  });
+  const homeRing = new THREE.Mesh(new THREE.RingGeometry(8, 11, 32), new THREE.MeshBasicMaterial({ color: planC, side: THREE.DoubleSide }));
+  homeRing.rotation.x = -Math.PI / 2; homeRing.position.copy(V(info.home[0], info.home[1], 0.3)); world.add(homeRing);
+
+  truthLine = new THREE.Line(lineGeom(MAXP), new THREE.LineBasicMaterial({ color: css("--truth") }));
+  estLine = new THREE.Line(lineGeom(MAXP), new THREE.LineBasicMaterial({ color: css("--est") }));
+  fixPts = new THREE.Points(lineGeom(MAXP), new THREE.PointsMaterial({ color: css("--fix"), size: 3.5, sizeAttenuation: false }));
+  [truthLine, estLine, fixPts].forEach((o) => { o.frustumCulled = false; world.add(o); });
+
+  // Camera footprint on the ground and frustum edges from the drone.
+  footprint = new THREE.LineLoop(lineGeom(4), new THREE.LineBasicMaterial({ color: css("--fix") }));
+  footprint.geometry.setDrawRange(0, 4);
+  frustum = new THREE.LineSegments(lineGeom(8), new THREE.LineBasicMaterial({ color: css("--fix"), transparent: true, opacity: 0.35 }));
+  frustum.geometry.setDrawRange(0, 8);
+  dropLine = new THREE.Line(lineGeom(2), new THREE.LineDashedMaterial({ color: 0xffffff, dashSize: 3, gapSize: 3, transparent: true, opacity: 0.5 }));
+  dropLine.geometry.setDrawRange(0, 2);
+  [footprint, frustum, dropLine].forEach((o) => { o.frustumCulled = false; world.add(o); });
+
+  drone = makeDrone(); world.add(drone);
+  // Fixed-size dot so the vehicle stays visible when zoomed out.
+  const dot = new THREE.Points(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3()]),
+    new THREE.PointsMaterial({ color: 0xffffff, size: 9, sizeAttenuation: false, depthTest: false }));
+  dot.renderOrder = 10; drone.add(dot);
+  view.target.copy(V(info.home[0], info.home[1], 40));
+  view.dist = 1200; view.el = 0.6; view.az = -0.6;
+}
+
+function makeDrone() {
+  // Quad X frame scaled up 6x so it reads from far away. Nose points along -z (north) at yaw 0.
+  const g = new THREE.Group(), k = 6;
+  const dark = new THREE.MeshLambertMaterial({ color: 0x2a2f2d });
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.35 * k, 0.12 * k, 0.5 * k), new THREE.MeshLambertMaterial({ color: 0xe8e8e2 }));
+  g.add(body);
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.12 * k, 0.08 * k, 0.12 * k), new THREE.MeshLambertMaterial({ color: 0xef6b5b }));
+  nose.position.set(0, 0.04 * k, -0.28 * k); g.add(nose);
+  [[1, 1], [1, -1], [-1, 1], [-1, -1]].forEach(([sx, sz]) => {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.06 * k, 0.04 * k, 0.75 * k), dark);
+    arm.position.set(sx * 0.18 * k, 0, sz * 0.18 * k);
+    arm.rotation.y = sx * sz > 0 ? Math.PI / 4 : -Math.PI / 4;
+    g.add(arm);
+    const rotor = new THREE.Mesh(new THREE.CylinderGeometry(0.2 * k, 0.2 * k, 0.01 * k, 24),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.35 }));
+    rotor.position.set(sx * 0.35 * k, 0.05 * k, sz * 0.35 * k); g.add(rotor);
+  });
+  return g;
+}
+
+// ---------- Footprint geometry (same camera model as visnav.ortho) ----------
+function mat3mul(A, B) { const C = [[0,0,0],[0,0,0],[0,0,0]]; for (let i=0;i<3;i++) for (let j=0;j<3;j++) for (let k=0;k<3;k++) C[i][j]+=A[i][k]*B[k][j]; return C; }
+function Rned(r, p, y) {
+  const cr=Math.cos(r), sr=Math.sin(r), cp=Math.cos(p), sp=Math.sin(p), cy=Math.cos(y), sy=Math.sin(y);
+  return mat3mul(mat3mul([[cy,-sy,0],[sy,cy,0],[0,0,1]], [[cp,0,sp],[0,1,0],[-sp,0,cp]]), [[1,0,0],[0,cr,-sr],[0,sr,cr]]);
+}
+function corners(rec) {
+  const [e, n, u] = rec.p, [r, p, y] = rec.att;
+  const R = mat3mul(Rned(r, p, y), [[0,-1,0],[1,0,0],[0,0,1]]);
+  const t = Math.tan(S.camera.hfov_deg * Math.PI / 360), a = S.camera.aspect * t;
+  return [[-t,-a],[t,-a],[t,a],[-t,a]].map(([x, z]) => {
+    const d = [0,1,2].map((i) => R[i][0]*x + R[i][1]*z + R[i][2]);
+    const s = d[2] > 0.15 ? u / d[2] : u / 0.15;
+    return V(e + d[1]*s, n + d[0]*s, 0.4);
+  });
+}
+
+// ---------- Playback ----------
+let t = 0, playing = true, speed = 16, lastFrame = performance.now(), follow = true;
+const duration = () => (records.length ? records[records.length - 1].t : 0);
+function idxAt(time) {
+  let lo = 0, hi = records.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (records[m].t <= time) lo = m; else hi = m - 1; }
+  return lo;
+}
+const errOf = (r) => Math.hypot(r.p[0] - r.ekf[0], r.p[1] - r.ekf[1]);
+
+function setRange(geom, i) { geom.setDrawRange(0, Math.min(i, MAXP)); geom.attributes.position.needsUpdate = true; }
+let filled = 0, fixCount = 0;
+function onNewRecord() {
+  // Append any new samples to the GPU buffers once; drawing is then a draw-range change.
+  const tp = truthLine.geometry.attributes.position.array, ep = estLine.geometry.attributes.position.array, fp = fixPts.geometry.attributes.position.array;
+  for (; filled < records.length && filled < MAXP; filled++) {
+    const r = records[filled];
+    tp.set([r.p[0], r.p[2], -r.p[1]], filled * 3);
+    ep.set([r.ekf[0], r.p[2], -r.ekf[1]], filled * 3);
+    if (r.fix) { fp.set([r.fix[0], 0.6, -r.fix[1]], fixCount * 3); r.fixIdx = ++fixCount; }
+    else r.fixIdx = fixCount;
+  }
+  truthLine.geometry.attributes.position.needsUpdate = true;
+  estLine.geometry.attributes.position.needsUpdate = true;
+  fixPts.geometry.attributes.position.needsUpdate = true;
+  if (live && follow) t = duration();
+  drawSpark();
+}
+
+function fmt(s) { s = Math.max(0, Math.floor(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
+let lastThumb = null;
+function update() {
+  if (!records.length) return;
+  const i = idxAt(t), r = records[i], nx = records[Math.min(i + 1, records.length - 1)];
+  const va = records[Math.max(i - 1, 0)], vb = records[Math.min(i + 1, records.length - 1)];
+  const f = nx.t > r.t ? Math.min(Math.max((t - r.t) / (nx.t - r.t), 0), 1) : 0;
+  const lerp = (a, b) => a + (b - a) * f;
+  const p = [0, 1, 2].map((k) => lerp(r.p[k], nx.p[k]));
+  drone.position.copy(V(p[0], p[1], p[2] + 1));
+  drone.rotation.set(0, 0, 0);
+  // ENU/three: yaw clockwise from north = rotation about -y; pitch nose-up = about +x; roll right = about -z
+  drone.rotation.order = "YXZ";
+  drone.rotation.y = -r.att[2]; drone.rotation.x = r.att[1]; drone.rotation.z = -r.att[0];
+
+  setRange(truthLine.geometry, i + 1); setRange(estLine.geometry, i + 1); setRange(fixPts.geometry, r.fixIdx);
+  const c = corners({ p, att: r.att });
+  const fpA = footprint.geometry.attributes.position.array, frA = frustum.geometry.attributes.position.array;
+  c.forEach((v, k) => { fpA.set([v.x, v.y, v.z], k * 3); frA.set([drone.position.x, drone.position.y, drone.position.z, v.x, v.y, v.z], k * 6); });
+  footprint.geometry.attributes.position.needsUpdate = true; frustum.geometry.attributes.position.needsUpdate = true;
+  dropLine.geometry.attributes.position.array.set([drone.position.x, drone.position.y, drone.position.z, drone.position.x, 0, drone.position.z]);
+  dropLine.geometry.attributes.position.needsUpdate = true; dropLine.computeLineDistances();
+  const showCam = p[2] > 3;
+  footprint.visible = frustum.visible = showCam;
+
+  // Status panel
+  const v = Math.hypot(vb.p[0] - va.p[0], vb.p[1] - va.p[1]) / Math.max(vb.t - va.t, 1e-3);
+  $("alt").textContent = `${p[2].toFixed(1)} m`;
+  $("spd").textContent = `${v.toFixed(1)} m/s`;
+  $("hdg").textContent = `${((r.att[2] * 180 / Math.PI + 360) % 360).toFixed(0).padStart(3, "0")}°`;
+  $("err").textContent = `${errOf(r).toFixed(1)} m`;
+  const legs = S.plan.length;
+  $("leg").textContent = `${Math.min(r.leg + 1, legs)} / ${legs} ${S.plan[Math.min(r.leg, legs - 1)].kind}`;
+  const chip = $("navchip");
+  if (p[2] < 1) { chip.className = "chip idle"; chip.textContent = "on ground"; }
+  else if (r.vis) { chip.className = "chip ok"; chip.textContent = "vision lock"; }
+  else { chip.className = "chip warn"; chip.textContent = "dead reckoning"; }
+  for (let k = i; k >= 0 && k > i - 40; k--) if (records[k].img) { if (lastThumb !== k) { $("thumb").src = "data:image/jpeg;base64," + records[k].img; lastThumb = k; } break; }
+  $("clock").textContent = `${fmt(t)} / ${fmt(duration())}${live ? " live" : ""}`;
+  if (!scrubbing) $("scrub").value = duration() ? Math.round(1000 * t / duration()) : 0;
+  sparkCursor = t;
+}
+
+// ---------- Error sparkline ----------
+let sparkCursor = 0;
+function drawSpark() {
+  const cv = $("spark"), dpr = Math.min(devicePixelRatio, 2);
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w) return;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
+  if (records.length < 2) return;
+  const T = duration(), errs = records.map(errOf), top = Math.max(5, Math.ceil(Math.max(...errs)));
+  $("sparkmax").textContent = `max ${Math.max(...errs).toFixed(1)}`;
+  g.strokeStyle = css("--line"); g.lineWidth = 1;
+  [0.5, 1].forEach((f) => { g.beginPath(); g.moveTo(0, h - 2 - (h - 4) * f + 0.5); g.lineTo(w, h - 2 - (h - 4) * f + 0.5); g.stroke(); });
+  g.beginPath();
+  records.forEach((r, k) => { const x = (r.t / T) * w, y = h - 2 - (errs[k] / top) * (h - 4); k ? g.lineTo(x, y) : g.moveTo(x, y); });
+  g.strokeStyle = css("--est"); g.lineWidth = 1.5; g.stroke();
+  g.lineTo(w, h); g.lineTo(0, h); g.closePath(); g.globalAlpha = 0.15; g.fillStyle = css("--est"); g.fill(); g.globalAlpha = 1;
+  // shade dead-reckoning stretches
+  g.fillStyle = css("--warn"); g.globalAlpha = 0.18;
+  records.forEach((r, k) => { if (!r.vis && r.p[2] > 1 && k + 1 < records.length) g.fillRect((r.t / T) * w, 0, ((records[k + 1].t - r.t) / T) * w + 0.5, h); });
+  g.globalAlpha = 1;
+  const cx = (sparkCursor / T) * w;
+  g.fillStyle = css("--fg"); g.fillRect(cx - 0.5, 0, 1, h);
+  drawSpark.at = performance.now();
+}
+
+// ---------- Camera control: orbit, chase, top ----------
+const view = { mode: "orbit", target: new THREE.Vector3(), dist: 1200, az: -0.6, el: 0.6 };
+function placeCamera() {
+  const d = drone.position;
+  if (view.mode === "chase") {
+    const r = records[idxAt(t)] || { att: [0, 0, 0] };
+    const yaw = r.att[2], back = 50, up = 24;
+    camera.position.lerp(new THREE.Vector3(d.x - Math.sin(yaw) * back, d.y + up, d.z + Math.cos(yaw) * back), 0.08);
+    camera.lookAt(d.x + Math.sin(yaw) * 60, Math.max(d.y - 30, 0), d.z - Math.cos(yaw) * 60);
+    return;
+  }
+  if (view.mode === "top") { view.el = 1.5; }
+  if (follow) view.target.lerp(new THREE.Vector3(d.x, d.y * 0.5, d.z), 0.05);
+  const c = Math.cos(view.el);
+  camera.position.set(view.target.x + view.dist * c * Math.sin(view.az), view.target.y + view.dist * Math.sin(view.el),
+                      view.target.z + view.dist * c * Math.cos(view.az));
+  camera.lookAt(view.target);
+}
+function setMode(m) {
+  view.mode = m; if (m === "orbit") view.el = 0.6;
+  ["orbit", "chase", "top"].forEach((k) => $("v-" + k).setAttribute("aria-pressed", String(k === m)));
+}
+["orbit", "chase", "top"].forEach((k) => ($("v-" + k).onclick = () => setMode(k)));
+
+const pointers = new Map(); let pinch0 = 0;
+const cv = $("gl");
+cv.addEventListener("pointerdown", (e) => { cv.setPointerCapture(e.pointerId); pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, b: e.button, sh: e.shiftKey }); });
+cv.addEventListener("pointerup", (e) => { pointers.delete(e.pointerId); pinch0 = 0; });
+cv.addEventListener("pointercancel", (e) => { pointers.delete(e.pointerId); pinch0 = 0; });
+cv.addEventListener("contextmenu", (e) => e.preventDefault());
+cv.addEventListener("pointermove", (e) => {
+  const p = pointers.get(e.pointerId); if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
+  if (view.mode === "chase") setMode("orbit");
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()], d = Math.hypot(a.x - b.x, a.y - b.y);
+    if (pinch0) view.dist = Math.min(8000, Math.max(60, view.dist * pinch0 / d)); pinch0 = d; return;
+  }
+  if (p.b === 2 || p.sh) {
+    follow = false;
+    const s = view.dist / 900, fx = Math.cos(view.az), fz = -Math.sin(view.az);
+    view.target.x -= (dx * fx + dy * Math.sin(view.az)) * s; view.target.z -= (dx * fz + dy * Math.cos(view.az)) * s;
+  } else {
+    view.az -= dx * 0.005;
+    if (view.mode === "top") setMode("orbit");
+    view.el = Math.min(1.55, Math.max(0.08, view.el + dy * 0.005));
+  }
+});
+cv.addEventListener("wheel", (e) => { e.preventDefault(); view.dist = Math.min(8000, Math.max(60, view.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
+cv.addEventListener("dblclick", () => { follow = true; });
+
+// ---------- Transport ----------
+let scrubbing = false;
+$("play").onclick = () => { playing = !playing; $("play").textContent = playing ? "Pause" : "Play"; if (playing && t >= duration()) t = 0; };
+$("scrub").addEventListener("input", () => { scrubbing = true; t = (duration() * $("scrub").value) / 1000; follow = true; });
+$("scrub").addEventListener("change", () => { scrubbing = false; });
+document.querySelectorAll("#speed button").forEach((b) => (b.onclick = () => {
+  speed = +b.dataset.s; document.querySelectorAll("#speed button").forEach((o) => o.setAttribute("aria-pressed", String(o === b)));
+}));
+window.addEventListener("keydown", (e) => { if (e.code === "Space" && e.target === document.body) { e.preventDefault(); $("play").click(); } });
+
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); drawSpark();
+}
+addEventListener("resize", resize);
+
+function loop(now) {
+  const dt = Math.min((now - lastFrame) / 1000, 0.1); lastFrame = now;
+  if (playing && !scrubbing && !(live && follow)) t = Math.min(t + dt * speed, duration());
+  if (playing && t >= duration() && !live && records.length) { playing = false; $("play").textContent = "Replay"; }
+  update(); placeCamera();
+  if (performance.now() - (drawSpark.at || 0) > 250) drawSpark();
+  renderer.render(world, camera);
+  requestAnimationFrame(loop);
+}
+resize();
+boot().catch((e) => { $("loading").textContent = "Could not load the flight: " + e.message; });
+</script>

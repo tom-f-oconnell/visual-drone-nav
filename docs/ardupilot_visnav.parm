@@ -1,0 +1,35 @@
+# ArduCopter parameters for vision-as-GPS via MAVLink GPS_INPUT.
+# Written for ArduPilot 4.5/4.6. Names changed across versions (GPS_TYPE became
+# GPS1_TYPE in 4.6): check each one in Mission Planner's full parameter list
+# before loading, and test in SITL before flight.
+
+# Jetson on TELEM2 (SERIAL2): MAVLink2 at 921600 baud.
+SERIAL2_PROTOCOL 2
+SERIAL2_BAUD 921
+
+# GPS1 = the Jetson's GPS_INPUT messages. Keep a real GPS as GPS2 for truth logging.
+GPS1_TYPE 14
+GPS2_TYPE 1
+GPS_AUTO_SWITCH 0
+GPS_PRIMARY 0
+# Latency from exposure to GPS_INPUT arrival (matching + filter), ms.
+GPS1_DELAY_MS 150
+
+# EKF3: horizontal position and velocity from "GPS" (vision), height from baro, yaw from compass.
+EK3_SRC1_POSXY 3
+EK3_SRC1_VELXY 3
+EK3_SRC1_POSZ 1
+EK3_SRC1_VELZ 0
+EK3_SRC1_YAW 1
+# Vision fixes do not carry real satellite quality data; relax the GPS pre-arm quality checks.
+EK3_GPS_CHECK 0
+
+# Downward rangefinder improves orthorectification scale (example: Benewake TF02 on SERIAL4).
+RNGFND1_TYPE 20
+RNGFND1_ORIENT 25
+RNGFND1_MAX_CM 2200
+SERIAL4_PROTOCOL 9
+
+# If vision is lost the EKF reports bad position: land rather than drift.
+FS_EKF_ACTION 1
+FS_EKF_THRESH 0.8

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+# Planner data: NAIP cache, saved missions, exported bundles
+data/
+# Mission bundles and flight logs
+*.tif
+*.tiff
+*.zip
+visnav_*.csv

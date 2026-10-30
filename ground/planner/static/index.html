@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NAIP Flight Planner</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <aside id="panel">
+    <h1>NAIP flight planner</h1>
+
+    <section>
+      <label>Mission <input id="name" value="mission1"></label>
+      <div class="row">
+        <select id="saved"><option value="">Load saved…</option></select>
+        <button id="save">Save</button>
+      </div>
+    </section>
+
+    <section class="grid">
+      <label>Cruise alt (m AGL) <input id="default_alt" type="number" value="120" min="5"></label>
+      <label>Takeoff alt (m) <input id="takeoff_alt" type="number" value="30" min="5"></label>
+      <label>Speed (m/s) <input id="speed" type="number" value="10" min="1" step="0.5"></label>
+      <label>Corridor half-width (m) <input id="corridor_m" type="number" value="400" min="50" step="50"></label>
+      <label>Camera HFOV (deg) <input id="hfov_deg" type="number" value="90" min="10" max="170"></label>
+      <label>End <select id="end_action">
+        <option value="rtl">Return to launch</option>
+        <option value="land">Land at last WP</option>
+        <option value="none">Loiter / nothing</option>
+      </select></label>
+    </section>
+
+    <section>
+      <h2>Waypoints <small>click map to add, drag to move</small></h2>
+      <ol id="wps"></ol>
+      <button id="clear" class="ghost">Clear all</button>
+    </section>
+
+    <section id="stats"></section>
+    <ul id="warnings"></ul>
+
+    <section class="actions">
+      <button id="cache">Cache NAIP for route</button>
+      <div id="progress" hidden><div id="bar"></div><span id="ptext"></span></div>
+      <button id="export" class="primary">Export mission bundle (.zip)</button>
+      <button id="wpl" class="ghost">Download .waypoints only</button>
+    </section>
+    <p class="foot" id="cfg"></p>
+  </aside>
+  <main id="map"></main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
