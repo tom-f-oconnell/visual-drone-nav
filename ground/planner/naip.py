@@ -153,8 +153,9 @@ class LocalSource:
 
     name = "local"
 
-    def __init__(self, root: str | os.PathLike):
+    def __init__(self, root: str | os.PathLike, years: Iterable[int] | None = None):
         self.root = Path(root)
+        self.years = set(years) if years else None
         self._index: list[tuple[SceneRef, tuple[float, float, float, float]]] | None = None
 
     def _build_index(self):
@@ -173,7 +174,8 @@ class LocalSource:
         if self._index is None:
             self._build_index()
         w, s, e, n = bbox
-        hits = [ref for ref, (l, b, r, t) in self._index if l < e and r > w and b < n and t > s]
+        hits = [ref for ref, (l, b, r, t) in self._index if l < e and r > w and b < n and t > s
+                and (not self.years or ref.year in self.years)]
         hits.sort(key=lambda r: r.year, reverse=True)
         return hits
 

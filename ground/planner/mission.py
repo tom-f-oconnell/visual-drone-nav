@@ -208,8 +208,8 @@ def build_map(mission: Mission, cache: NaipCache, out_path: Path) -> dict:
     }
 
 
-def build_bundle(mission: Mission, cache: NaipCache, workdir: Path) -> bytes:
-    """Write the bundle files into workdir and return them zipped."""
+def write_bundle(mission: Mission, cache: NaipCache, workdir: Path):
+    """Write the bundle files into workdir."""
     workdir.mkdir(parents=True, exist_ok=True)
     map_meta = build_map(mission, cache, workdir / "map.tif")
     wpl = mission.to_wpl()
@@ -226,6 +226,10 @@ def build_bundle(mission: Mission, cache: NaipCache, workdir: Path) -> bytes:
     }
     (workdir / "mission.json").write_text(json.dumps(meta, indent=2))
 
+
+def build_bundle(mission: Mission, cache: NaipCache, workdir: Path) -> bytes:
+    """Write the bundle files into workdir and return them zipped."""
+    write_bundle(mission, cache, workdir)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name in ("mission.json", "mission.waypoints", "map.tif"):

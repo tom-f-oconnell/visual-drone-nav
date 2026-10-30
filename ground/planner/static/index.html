@@ -43,13 +43,47 @@
 
     <section class="actions">
       <button id="cache">Cache NAIP for route</button>
-      <div id="progress" hidden><div id="bar"></div><span id="ptext"></span></div>
+      <div id="progress" class="progress" hidden><div id="bar" class="bar"></div><span id="ptext" class="ptext"></span></div>
       <button id="export" class="primary">Export mission bundle (.zip)</button>
       <button id="wpl" class="ghost">Download .waypoints only</button>
     </section>
+
+    <section id="simsec">
+      <h2>Simulate <small>a GPS-denied flight of this route</small></h2>
+      <div class="grid">
+        <label class="wide">Camera imagery <select id="sim_world">
+          <option value="">Same imagery as the map (optimistic)</option>
+        </select></label>
+        <label>Wind (m/s) <input id="sim_wind" type="number" value="3" min="0" max="30" step="0.5"></label>
+        <label>Wind from (deg) <input id="sim_wind_from" type="number" value="300" min="0" max="360" step="10"></label>
+        <label>Gusts (m/s) <input id="sim_gust" type="number" value="1.5" min="0" max="15" step="0.5"></label>
+        <label>Random seed <input id="sim_seed" type="number" value="0" min="0"></label>
+        <label class="wide">Pace <select id="sim_pace">
+          <option value="0">As fast as possible</option>
+          <option value="1">Real time</option>
+        </select></label>
+      </div>
+      <button id="sim_run" class="primary" disabled>Run simulation</button>
+      <div id="sim_progress" class="progress" hidden><div id="sim_bar" class="bar"></div><span id="sim_ptext" class="ptext"></span></div>
+      <p id="sim_result"></p>
+      <div class="row">
+        <select id="sim_runs"><option value="">Past simulations…</option></select>
+        <button id="sim_stop" hidden>Stop</button>
+        <button id="sim_delete" class="ghost" hidden>Delete</button>
+      </div>
+    </section>
+    <p id="sim_missing" hidden>Simulation needs the onboard package: <code>pip install -e onboard --no-deps</code></p>
+
     <p class="foot" id="cfg"></p>
   </aside>
-  <main id="map"></main>
+  <div id="main">
+    <nav id="tabs" hidden>
+      <button id="tab_plan" aria-pressed="true">Plan</button>
+      <button id="tab_sim" aria-pressed="false">Simulation</button>
+    </nav>
+    <main id="map"></main>
+    <iframe id="simview" title="3D view of the simulated flight" hidden></iframe>
+  </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/static/app.js"></script>

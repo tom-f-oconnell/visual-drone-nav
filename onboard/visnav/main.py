@@ -195,6 +195,13 @@ def cmd_upload(args):
 
 
 # sim3d / view -----------------------------------------------------------------
+def write_atomic(path: Path, text: str):
+    """So that something following a run never reads a half written file."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
 def cmd_sim3d(args):
     from .flightsim import FlightSim, SimConfig, map_texture
     from .viewer import FlightFeed, export_html, serve
@@ -209,10 +216,18 @@ def cmd_sim3d(args):
     if args.port:
         serve(feed, args.port, args.host)
         print(f"3D viewer: http://{args.host}:{args.port}/")
+    run_dir = Path(args.run_dir) if args.run_dir else None
+    if run_dir:
+        (run_dir / "map.jpg").write_bytes(feed.map_jpg)
+        records_out = open(run_dir / "records.jsonl", "w")
+        write_atomic(run_dir / "scene.json", json.dumps(feed.scene))
     wall0 = time.monotonic()
 
     def on_record(rec):
         feed.push(rec)
+        if run_dir:
+            records_out.write(json.dumps(rec) + "\n")
+            records_out.flush()
         if args.realtime:
             ahead = rec["t"] / args.realtime - (time.monotonic() - wall0)
             if ahead > 0:
@@ -220,6 +235,9 @@ def cmd_sim3d(args):
 
     records, summary = sim.run(on_record=on_record)
     feed.finish(summary)
+    if run_dir:
+        records_out.close()
+        write_atomic(run_dir / "summary.json", json.dumps(summary))
     print(json.dumps(summary, indent=2))
     if args.export:
         export_html(args.export, feed.scene, records, feed.map_jpg, summary)
@@ -327,6 +345,8 @@ def main(argv=None):
     f.add_argument("--export", help="write a standalone replay HTML here")
     f.add_argument("--record", help="write records JSON here")
     f.add_argument("--exit", action="store_true", help="exit when the flight ends instead of serving on")
+    f.add_argument("--run-dir", help="existing directory to write scene.json, map.jpg, records.jsonl (as the flight "
+                                     "goes) and summary.json to; the planner website follows runs this way")
     f.set_defaults(func=cmd_sim3d)
 
     w = sub.add_parser("view", help="3D viewer following ArduPilot SITL or a vehicle over MAVLink")

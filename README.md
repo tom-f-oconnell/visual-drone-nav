@@ -18,6 +18,7 @@ See the system diagram artifact for hardware wiring and data flow.
 ```bash
 cd ground
 pip install -r requirements.txt
+pip install -e ../onboard --no-deps      # for the Simulate panel
 uvicorn planner.app:app --port 8347      # open http://localhost:8347
 ```
 
@@ -25,7 +26,11 @@ uvicorn planner.app:app --port 8347      # open http://localhost:8347
 2. **Cache NAIP for route** downloads every 0.01 degree cell that the corridor touches.
    Reads are windowed range requests against the Planetary Computer COGs, so only
    the needed pixels are fetched. Cells are kept in `data/naip/` and reused across missions.
-3. **Export mission bundle** gives a zip with `mission.waypoints` (QGC WPL 110),
+3. **Run simulation** flies the route GPS-denied and shows the flight live in 3D,
+   then the error statistics. Choose another NAIP year as the camera imagery for a
+   realistic result: with the map's own imagery the matching is too easy. That
+   year is downloaded once and cached. Runs stay in `data/sim/` to replay.
+4. **Export mission bundle** gives a zip with `mission.waypoints` (QGC WPL 110),
    `mission.json` and `map.tif` (UTM, RGB, 0.6 m).
 
 Settings (environment variables): `NAIPNAV_DATA` (data dir), `NAIPNAV_GSD`
@@ -89,6 +94,8 @@ compass, a long-range downward lidar, and a real GPS on GPS2 for comparison
 only. [design.md](design.md) explains each choice.
 
 ## Flight simulator and 3D viewer
+
+The planner's Simulate panel is the easiest way to run this. From the command line:
 
 ```bash
 visnav sim3d --bundle ~/missions/mission1              # open http://127.0.0.1:27351/
@@ -189,6 +196,8 @@ pytest tests
   controller over UDP, and checks the 3D viewer can follow it.
 * `test_matcher.py` covers the correlation matcher, matcher chains and the
   re-lock rule.
+* `test_sim_web.py` runs, stops, replays and deletes simulations through the
+  planner's API, including a camera from another NAIP year.
 * `test_naip.py` checks cached cells land exactly on the UTM grid, including
   when read from a COG overview.
 * `test_odometry.py` checks odometry against known moves from 2 to 120 m, the

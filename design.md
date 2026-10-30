@@ -113,6 +113,15 @@ alternative.
 * The planner's corridor includes the return-to-launch leg (it used not to, and
   sims flew the leg home over no imagery).
 
+Simulations started from the planner website (`ground/planner/simruns.py`) are
+`visnav sim3d` subprocesses, at most three at a time. A separate process keeps a
+heavy flight from stalling the planner, and keeps the onboard package an optional
+dependency of it. The simulator appends to files in the run's directory and the
+website's routes read them, so a live run and a replay take the same path and
+runs survive a restart of the planner. The viewer is `sim3d`'s own page, served
+per run under `/sim/<id>/`, which works because it only uses relative URLs. The
+temporary bundle is deleted after each run, as the NAIP cache can rebuild it.
+
 ## Measured on real NAIP
 
 Planner: caching works against Planetary Computer; a 4-cell route takes ~40 s

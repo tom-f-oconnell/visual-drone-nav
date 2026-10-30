@@ -12,18 +12,20 @@ Environment variables:
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import cv2
 import numpy as np
 import rasterio
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
@@ -32,6 +34,7 @@ from shapely.geometry import mapping
 
 from .mission import Mission, build_bundle
 from .naip import Cell, LocalSource, NaipCache, StacSource, cells_for_bbox
+from .simruns import ACTIVE_STATES, SimRequest, SimRuns, TooManyRuns, simulator_available
 
 DATA = Path(os.environ.get("NAIPNAV_DATA", "data")).resolve()
 GSD = float(os.environ.get("NAIPNAV_GSD", "0.6"))
@@ -45,10 +48,23 @@ BUNDLES = DATA / "bundles"
 for d in (MISSIONS, BUNDLES):
     d.mkdir(parents=True, exist_ok=True)
 
-source = StacSource(years=YEARS or None) if SOURCE == "pc" else LocalSource(SOURCE)
-cache = NaipCache(DATA / "naip", source, gsd=GSD)
 
-app = FastAPI(title="NAIP flight planner")
+def _source(years: list[int] | None = None):
+    return StacSource(years=years) if SOURCE == "pc" else LocalSource(SOURCE, years=years)
+
+
+source = _source(YEARS or None)
+cache = NaipCache(DATA / "naip", source, gsd=GSD)
+sim_runs = SimRuns(DATA / "sim", cache, lambda year: NaipCache(DATA / "naip", _source([year]), gsd=GSD), FETCH_THREADS)
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    yield
+    sim_runs.stop_all()
+
+
+app = FastAPI(title="NAIP flight planner", lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 _pool = ThreadPoolExecutor(max_workers=4)
@@ -63,7 +79,7 @@ def index():
 
 @app.get("/api/config")
 def config():
-    return {"gsd": GSD, "source": source.name, "data_dir": str(DATA)}
+    return {"gsd": GSD, "source": source.name, "data_dir": str(DATA), "simulator": simulator_available()}
 
 
 # Missions -----------------------------------------------------------------
@@ -193,6 +209,129 @@ def cached_cells():
             "geometry": {"type": "Polygon", "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]]},
         })
     return {"type": "FeatureCollection", "features": feats}
+
+
+# Simulation -----------------------------------------------------------------
+def _run_dir(run_id: str) -> Path:
+    d = sim_runs.dir(run_id)
+    if d is None:
+        raise HTTPException(404, "no such simulation")
+    return d
+
+
+@app.post("/api/sim/years")
+def sim_years(mission: Mission):
+    """NAIP years over the corridor that are not in the map, to render the camera from."""
+    if not mission.waypoints:
+        return {"years": []}
+    _, poly_ll = mission.corridor()
+    all_years = {scene.year for scene in _source().scenes(poly_ll.bounds)}
+    map_years = {s["year"] for c in mission.required_cells() for s in (cache.meta(c) or {"scenes": []})["scenes"]}
+    return {"years": sorted(all_years - map_years, reverse=True)}
+
+
+@app.get("/api/sim/runs")
+def list_sim_runs():
+    return sim_runs.list()
+
+
+@app.post("/api/sim/runs")
+def start_sim_run(req: SimRequest):
+    if not simulator_available():
+        raise HTTPException(503, "the simulator is not installed: pip install -e onboard --no-deps")
+    if len(req.mission.waypoints) < 2:
+        raise HTTPException(400, "need at least two waypoints")
+    missing = [c.key for c in req.mission.required_cells() if not cache.has(c)]
+    if missing:
+        raise HTTPException(409, f"{len(missing)} NAIP cells not cached yet; run 'Cache NAIP' first")
+    try:
+        return sim_runs.start(req.mission, req.options)
+    except TooManyRuns as exc:
+        raise HTTPException(429, str(exc)) from exc
+
+
+@app.get("/api/sim/runs/{run_id}")
+def sim_run_info(run_id: str):
+    _run_dir(run_id)
+    return sim_runs.info(run_id)
+
+
+@app.post("/api/sim/runs/{run_id}/stop")
+def stop_sim_run(run_id: str):
+    _run_dir(run_id)
+    sim_runs.stop(run_id)
+    return {"stopped": run_id}
+
+
+@app.delete("/api/sim/runs/{run_id}")
+def delete_sim_run(run_id: str):
+    _run_dir(run_id)
+    sim_runs.delete(run_id)
+    return {"deleted": run_id}
+
+
+# The 3D viewer of `visnav sim3d`, whose page uses relative URLs, so each run has its own copy of the routes.
+@app.get("/sim/{run_id}/")
+def sim_viewer(run_id: str):
+    _run_dir(run_id)
+    if not simulator_available():
+        raise HTTPException(503, "the simulator is not installed: pip install -e onboard --no-deps")
+    from visnav.viewer import viewer_html
+
+    return Response(viewer_html("three.min.js"), media_type="text/html; charset=utf-8")
+
+
+@app.get("/sim/{run_id}/three.min.js")
+def sim_viewer_three(run_id: str):
+    _run_dir(run_id)
+    from visnav.viewer import STATIC as VIEWER_STATIC
+
+    return FileResponse(VIEWER_STATIC / "three.min.js", media_type="application/javascript")
+
+
+def _run_file(run_id: str, name: str) -> Path:
+    path = _run_dir(run_id) / name
+    if not path.exists():  # the simulator writes these once it is up
+        raise HTTPException(404, f"no {name} yet")
+    return path
+
+
+@app.get("/sim/{run_id}/scene.json")
+def sim_scene(run_id: str):
+    return FileResponse(_run_file(run_id, "scene.json"), media_type="application/json")
+
+
+@app.get("/sim/{run_id}/map.jpg")
+def sim_map(run_id: str):
+    return FileResponse(_run_file(run_id, "map.jpg"), media_type="image/jpeg")
+
+
+@app.get("/sim/{run_id}/events")
+async def sim_events(run_id: str):
+    """Server-sent events: every record so far, then new ones as the simulator appends them."""
+    path = _run_dir(run_id) / "records.jsonl"
+
+    async def stream():
+        pos, partial = 0, b""
+        while True:
+            # Checked before reading, so nothing written just before the run ended is missed.
+            over = sim_runs.state(run_id) not in ACTIVE_STATES
+            if path.exists():
+                with open(path, "rb") as f:
+                    f.seek(pos)
+                    chunk = f.read(1 << 20)
+                pos += len(chunk)
+                *lines, partial = (partial + chunk).split(b"\n")
+                for line in lines:
+                    yield b"data: " + line + b"\n\n"
+                if len(chunk) == 1 << 20:
+                    continue
+            if over:
+                yield b"event: done\ndata: {}\n\n"
+                return
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 
 # Tiles of cached imagery, so the planner can show exactly what the drone will match against.

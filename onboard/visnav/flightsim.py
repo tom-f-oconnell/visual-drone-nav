@@ -231,7 +231,7 @@ class FlightSim:
         records, fixes, thumb = [], 0, None
         frames = map_frames = 0
         last_fix = None
-        while not self.landed and self.t < cfg.max_time:
+        while not self.landed and self.leg < len(self.plan) and self.t < cfg.max_time:
             est_p = np.array([self.ekf[0].x[0], self.ekf[1].x[0]])
             est_v = np.array([self.ekf[0].x[1], self.ekf[1].x[1]])
             a = self._control(est_p, est_v, dt)
@@ -297,7 +297,8 @@ class FlightSim:
 
         errs, low = err(0.3, np.inf), err(0.3, cfg.min_vision_alt)
         summary = {
-            "duration_s": round(self.t, 1), "landed": self.landed, "camera_frames": frames,
+            "duration_s": round(self.t, 1), "landed": self.landed,
+            "mission_complete": self.landed or self.leg >= len(self.plan), "camera_frames": frames,
             "vision_fixes": fixes, "fix_rate": round(fixes / max(map_frames, 1), 3),
             "ekf_err_median_m": round(float(np.median(errs)), 2) if len(errs) else None,
             "ekf_err_p95_m": round(float(np.percentile(errs, 95)), 2) if len(errs) else None,

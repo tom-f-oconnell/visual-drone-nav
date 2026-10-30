@@ -1,4 +1,4 @@
-// NAIP flight planner front end: Leaflet map, waypoint editing, cache + export calls.
+// NAIP flight planner front end: Leaflet map, waypoint editing, cache + export calls, simulations.
 const $ = (id) => document.getElementById(id);
 const FIELDS = ["default_alt", "takeoff_alt", "speed", "corridor_m"];
 
@@ -81,7 +81,7 @@ async function api(path, opts = {}) {
   return r;
 }
 
-let checkTimer;
+let checkTimer, routeCached = false;
 function check() {
   clearTimeout(checkTimer);
   checkTimer = setTimeout(async () => {
@@ -94,7 +94,9 @@ function check() {
        NAIP cells: ${res.cached}/${res.cells} cached` +
       (res.cells > res.cached ? `, about ${res.est_download_mb} MB to fetch.` : ".");
     $("warnings").innerHTML = res.warnings.map((w) => `<li>${w}</li>`).join("");
-    $("export").disabled = !(res.cells && res.cached === res.cells);
+    routeCached = Boolean(res.cells && res.cached === res.cells);
+    $("export").disabled = !routeCached;
+    updateSimButton();
   }, 250);
 }
 
@@ -164,10 +166,174 @@ async function refreshCells() {
   cellsLayer.addData(await (await api("/api/cache/cells")).json());
 }
 
+// Simulation: runs execute on the server, the 3D viewer of each is shown in an iframe.
+const ACTIVE = ["preparing", "fetching", "running"];
+let simulator = false, openRun = null, simTimer;
+
+function showSim(show) {
+  $("map").hidden = show;
+  $("simview").hidden = !show;
+  $("tab_plan").setAttribute("aria-pressed", !show);
+  $("tab_sim").setAttribute("aria-pressed", show);
+  if (!show) map.invalidateSize();
+}
+$("tab_plan").onclick = () => showSim(false);
+$("tab_sim").onclick = () => showSim(true);
+
+function updateSimButton() {
+  const ready = simulator && routeCached && wps.length >= 2;
+  $("sim_run").disabled = !ready;
+  $("sim_run").title = ready ? "" : "Add at least two waypoints and cache NAIP for the route first";
+  if (ready) refreshYears();
+}
+
+// Other NAIP years over the route, looked up once it is cached so the list is ready before it is opened.
+let yearsKey = null;
+async function refreshYears() {
+  const m = mission();
+  const key = JSON.stringify([m.waypoints, m.corridor_m]);
+  if (key === yearsKey) return;
+  yearsKey = key;
+  try {
+    const { years } = await (await api("/api/sim/years", { method: "POST", body: JSON.stringify(m) })).json();
+    if (key !== yearsKey) return;
+    const sel = $("sim_world"), keep = sel.value;
+    while (sel.options.length > 1) sel.remove(1);
+    years.forEach((y) => sel.add(new Option(`NAIP ${y} (realistic, downloads it if needed)`, y)));
+    sel.value = keep;
+    if (sel.selectedIndex < 0) sel.selectedIndex = 0;
+  } catch (e) { yearsKey = null; console.warn(e); }
+}
+
+$("sim_run").onclick = async () => {
+  $("sim_run").disabled = true;
+  try {
+    const options = {
+      seed: +$("sim_seed").value, wind_speed: +$("sim_wind").value, wind_from_deg: +$("sim_wind_from").value,
+      gust: +$("sim_gust").value, realtime: +$("sim_pace").value,
+      world_year: $("sim_world").value ? +$("sim_world").value : null,
+    };
+    const body = JSON.stringify({ mission: mission(), options });
+    const run = await (await api("/api/sim/runs", { method: "POST", body })).json();
+    await refreshRuns();
+    followRun(run.id);
+  } catch (e) { alert(e.message); }
+  updateSimButton();
+};
+
+function followRun(id) {
+  clearTimeout(simTimer);
+  openRun = id;
+  const view = $("simview");
+  delete view.dataset.run;
+  view.removeAttribute("src");
+  showSim(false);
+  $("tabs").hidden = true;
+  $("sim_runs").value = id || "";
+  $("sim_result").textContent = "";
+  $("sim_progress").hidden = $("sim_stop").hidden = $("sim_delete").hidden = true;
+  if (id) pollRun();
+}
+
+async function pollRun() {
+  const id = openRun;
+  let run;
+  try {
+    run = await (await api(`/api/sim/runs/${id}`)).json();
+  } catch (e) {
+    if (id === openRun) followRun(null);
+    return;
+  }
+  if (id !== openRun) return;
+  renderRun(run);
+  if (ACTIVE.includes(run.state)) simTimer = setTimeout(pollRun, 1000);
+  else refreshRuns();
+}
+
+function clock(t) { return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`; }
+
+let shownState = null;
+function renderRun(run) {
+  // The panel is long: keep the progress or the result in sight.
+  if (run.state !== shownState) requestAnimationFrame(() => $("simsec").scrollIntoView({ block: "end" }));
+  shownState = run.state;
+  const view = $("simview");
+  if (run.viewable && view.dataset.run !== run.id) {
+    view.dataset.run = run.id;
+    view.src = `/sim/${run.id}/`;
+    $("tabs").hidden = false;
+    showSim(true);
+  }
+  const active = ACTIVE.includes(run.state);
+  $("sim_progress").hidden = !active;
+  $("sim_stop").hidden = !active;
+  $("sim_delete").hidden = active;
+  if (active) {
+    let frac = 0, text = "Building the map…";
+    if (run.state === "fetching" && run.cells) {
+      frac = run.cells.total ? run.cells.done / run.cells.total : 1;
+      text = `Downloading NAIP ${run.options.world_year}: ${run.cells.done} / ${run.cells.total} cells`;
+    } else if (run.state === "running") {
+      text = "Starting the simulator…";
+      if (run.progress) {
+        frac = run.progress.leg / run.progress.legs;
+        text = `Leg ${Math.min(run.progress.leg + 1, run.progress.legs)} of ${run.progress.legs}, ${clock(run.progress.t)} flown`;
+      }
+    }
+    $("sim_bar").style.width = `${100 * frac}%`;
+    $("sim_ptext").textContent = text;
+  }
+  $("sim_result").textContent = active ? "" : resultText(run);
+}
+
+function resultText(run) {
+  if (run.state === "failed") return `Failed: ${run.error}`;
+  if (run.state === "stopped") return "Stopped before the end of the flight.";
+  const s = run.summary;
+  const end = s.landed ? `Landed ${s.landing_error_m} m from the target.`
+    : s.mission_complete ? `Reached the last waypoint, ${s.landing_error_m} m off.` : "Ran out of time before finishing.";
+  const note = run.options.world_year ? `Camera saw NAIP ${run.options.world_year}.`
+    : "The camera saw the map's own imagery, so this is optimistic.";
+  return `${end} Position error: median ${s.ekf_err_median_m} m, 95% ${s.ekf_err_p95_m} m, ` +
+    `max ${s.ekf_err_max_m} m. Map fixes on ${Math.round(100 * s.fix_rate)}% of frames. ${note}`;
+}
+
+$("sim_stop").onclick = () => api(`/api/sim/runs/${openRun}/stop`, { method: "POST" }).catch((e) => alert(e.message));
+
+$("sim_delete").onclick = async () => {
+  if (!confirm("Delete this simulation?")) return;
+  try {
+    await api(`/api/sim/runs/${openRun}`, { method: "DELETE" });
+    followRun(null);
+    await refreshRuns();
+  } catch (e) { alert(e.message); }
+};
+
+$("sim_runs").onchange = () => followRun($("sim_runs").value || null);
+
+async function refreshRuns() {
+  const runs = await (await api("/api/sim/runs")).json();
+  const sel = $("sim_runs");
+  while (sel.options.length > 1) sel.remove(1);
+  runs.forEach((r) => {
+    const outcome = r.state === "finished" ? `${r.summary.ekf_err_median_m} m median` : r.state;
+    sel.add(new Option(`${r.name}, ${r.created.slice(5, 16).replace("T", " ")}: ${outcome}`, r.id));
+  });
+  sel.value = openRun || "";
+  return runs;
+}
+
 (async () => {
   const cfg = await (await api("/api/config")).json();
   $("cfg").textContent = `Imagery source: ${cfg.source}, cache GSD ${cfg.gsd} m, data in ${cfg.data_dir}`;
+  simulator = cfg.simulator;
+  $("simsec").hidden = !simulator;
+  $("sim_missing").hidden = simulator;
   refreshSaved();
   refreshCells();
   check();
+  if (simulator) {
+    const running = (await refreshRuns()).find((r) => ACTIVE.includes(r.state));
+    if (running) followRun(running.id);
+  }
 })();
