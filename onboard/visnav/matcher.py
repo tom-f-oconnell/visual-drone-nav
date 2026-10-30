@@ -26,6 +26,8 @@ class FeatureBackend:
             self.det = cv2.ORB_create(nfeatures=nfeatures, scaleFactor=1.2, nlevels=6, fastThreshold=10)
             self.norm, self.ratio = cv2.NORM_HAMMING, 0.85
         elif kind == "akaze":
+            if not hasattr(cv2, "AKAZE_create"):
+                raise ValueError("AKAZE is not in OpenCV 5's main modules; use OpenCV 4.x (as in JetPack)")
             self.det = cv2.AKAZE_create(threshold=0.0005)
             self.norm, self.ratio = cv2.NORM_HAMMING, 0.85
         elif kind == "sift":

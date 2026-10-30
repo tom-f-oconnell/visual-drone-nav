@@ -36,6 +36,11 @@ def load_bundle(path: str):
     return d, meta, MapRaster.load(d / meta["map"]["file"])
 
 
+def load_world(args, map_: MapRaster) -> MapRaster:
+    """Imagery to render simulated camera frames from: --world, else the bundle map."""
+    return MapRaster.load(args.world) if args.world else map_
+
+
 def camera_from_args(args, meta) -> CameraModel:
     if args.calib:
         return CameraModel.from_json(args.calib)
@@ -128,6 +133,7 @@ def cmd_sim(args):
     from .sim import fly_route, render
 
     _, meta, map_ = load_bundle(args.bundle)
+    world = load_world(args, map_)
     cam = camera_from_args(args, meta)
     rng = np.random.default_rng(args.seed)
     route = [(w["lat"], w["lon"], w["alt"] or meta["mission"]["default_alt"]) for w in meta["mission"]["waypoints"]]
@@ -139,7 +145,7 @@ def cmd_sim(args):
         if args.frames and n >= args.frames:
             break
         n += 1
-        img = render(map_, cam, pose.lat, pose.lon, pose.h, pose.roll, pose.pitch, pose.yaw, rng)
+        img = render(world, cam, pose.lat, pose.lon, pose.h, pose.roll, pose.pitch, pose.yaw, rng)
         # Sensor errors in what the navigator is told.
         roll = pose.roll + math.radians(rng.normal(0, args.att_noise))
         pitch = pose.pitch + math.radians(rng.normal(0, args.att_noise))
@@ -188,7 +194,7 @@ def cmd_sim3d(args):
     nav = build_navigator(args, meta, map_, cam)
     cfg = SimConfig(seed=args.seed, camera_hz=args.camera_hz, wind=(args.wind_e, args.wind_n),
                     gust_sigma=args.gust)
-    sim = FlightSim(map_, cam, nav, meta, cfg)
+    sim = FlightSim(map_, cam, nav, meta, cfg, world=load_world(args, map_))
     feed = FlightFeed(sim.scene(), map_texture(map_))
     if args.port:
         serve(feed, args.port, args.host)
@@ -252,6 +258,10 @@ def main(argv=None):
         sp.add_argument("--start-sigma", type=float, default=150.0, help="m, uncertainty of start position")
         sp.add_argument("-v", "--verbose", action="store_true")
 
+    def world_arg(sp):
+        sp.add_argument("--world", help="GeoTIFF to render camera frames from (default: the bundle map), "
+                                        "e.g. the map.tif of the same mission exported from another NAIP year")
+
     r = sub.add_parser("run", help="fly: camera + MAVLink")
     common(r)
     r.add_argument("--mavlink", default="/dev/ttyTHS1")
@@ -267,6 +277,7 @@ def main(argv=None):
 
     s = sub.add_parser("sim", help="synthetic flight over the bundle map")
     common(s)
+    world_arg(s)
     s.add_argument("--rate", type=float, default=2.0, help="frames per second of flight")
     s.add_argument("--frames", type=int, default=0)
     s.add_argument("--seed", type=int, default=0)
@@ -284,6 +295,7 @@ def main(argv=None):
 
     f = sub.add_parser("sim3d", help="closed-loop flight simulation with a 3D viewer")
     common(f)
+    world_arg(f)
     f.add_argument("--seed", type=int, default=0)
     f.add_argument("--camera-hz", type=float, default=4.0)
     f.add_argument("--wind-e", type=float, default=3.0, help="m/s wind toward east")

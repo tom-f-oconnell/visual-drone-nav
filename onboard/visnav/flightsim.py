@@ -102,8 +102,11 @@ class FlightSim:
     nav: Navigator
     meta: dict
     cfg: SimConfig = field(default_factory=SimConfig)
+    world: MapRaster | None = None  # imagery camera frames are rendered from (default: map)
 
     def __post_init__(self):
+        if self.world is None:
+            self.world = self.map
         h, w = self.map.shape
         self.origin = np.array(self.map.px_to_grid(w / 2, h / 2))
         self.rng = np.random.default_rng(self.cfg.seed)
@@ -238,7 +241,7 @@ class FlightSim:
                 next_cam += 1 / cfg.camera_hz
                 if tr.p[2] >= cfg.min_vision_alt:
                     lat, lon = self._local_to_ll(tr.p[0], tr.p[1])
-                    img = render(self.map, self.cam, lat, lon, tr.p[2], tr.roll, tr.pitch, tr.yaw, self.rng)
+                    img = render(self.world, self.cam, lat, lon, tr.p[2], tr.roll, tr.pitch, tr.yaw, self.rng)
                     frames += 1
                     fix = self.nav.process(
                         img, self.t,

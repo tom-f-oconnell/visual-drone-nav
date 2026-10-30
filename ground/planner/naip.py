@@ -9,7 +9,9 @@ Two imagery sources are supported:
 
 * ``StacSource``: Microsoft Planetary Computer STAC API (default). The COGs
   are read with windowed HTTP range requests, so only the pixels covering a
-  cell are downloaded, never the whole 7.5 minute quarter quad.
+  cell are downloaded, never the whole 7.5 minute quarter quad. Scenes finer
+  than the cache GSD (e.g. 0.3 m NAIP from 2022 on) are read from a COG
+  overview, so they cost no more than 0.6 m scenes.
 * ``LocalSource``: a directory of NAIP GeoTIFFs you downloaded yourself (for
   example from USGS EarthExplorer), useful offline or on an air-gapped laptop.
 """
@@ -20,6 +22,8 @@ import json
 import logging
 import math
 import os
+import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Protocol
@@ -27,9 +31,10 @@ from typing import Iterable, Protocol
 import numpy as np
 import rasterio
 from rasterio.enums import Resampling
-from rasterio.transform import from_origin
-from rasterio.vrt import WarpedVRT
-from rasterio.warp import transform_bounds
+from rasterio.errors import WindowError
+from rasterio.transform import array_bounds, from_origin
+from rasterio.warp import reproject, transform_bounds
+from rasterio.windows import Window, from_bounds
 
 log = logging.getLogger(__name__)
 
@@ -115,10 +120,10 @@ class StacSource:
                  years: Iterable[int] | None = None):
         self.url, self.collection, self.asset = url, collection, asset
         self.years = set(years) if years else None
-        self._client = None
+        self._local = threading.local()  # one client per thread, cells are fetched in parallel
 
     def _open(self):
-        if self._client is None:
+        if getattr(self._local, "client", None) is None:
             import pystac_client
 
             modifier = None
@@ -126,8 +131,8 @@ class StacSource:
                 import planetary_computer
 
                 modifier = planetary_computer.sign_inplace
-            self._client = pystac_client.Client.open(self.url, modifier=modifier)
-        return self._client
+            self._local.client = pystac_client.Client.open(self.url, modifier=modifier)
+        return self._local.client
 
     def scenes(self, bbox):
         search = self._open().search(collections=[self.collection], bbox=list(bbox), max_items=200)
@@ -179,14 +184,55 @@ def _year_from_name(name: str) -> int:
     return int(digits) if digits.isdigit() else 0
 
 
+def read_scene(href: str, crs: str, transform, width: int, height: int) -> np.ndarray | None:
+    """Read the RGB of one scene reprojected onto a pixel grid, 0 where it has no data.
+
+    One windowed read, then an in-memory reproject. Over HTTP this is several
+    times faster than a WarpedVRT, which fetches blocks in many small serial
+    requests. Reads from the coarsest overview that is still at least as fine
+    as the grid, which also avoids aliasing when downsampling.
+
+    Returns:
+        3 x height x width uint8 array, or None if the scene misses the grid.
+    """
+    gsd = abs(transform.a)
+    with rasterio.open(href) as src:
+        level = None
+        for i, factor in enumerate(src.overviews(1)):
+            if src.res[0] * factor <= gsd * 1.01:
+                level = i
+    with rasterio.open(href, **({} if level is None else {"overview_level": level})) as src:
+        bounds = transform_bounds(crs, src.crs, *array_bounds(height, width, transform), densify_pts=21)
+        win = from_bounds(*bounds, src.transform)
+        # Pad so bilinear resampling has neighbours at the edges.
+        win = Window(math.floor(win.col_off) - 2, math.floor(win.row_off) - 2,
+                     math.ceil(win.width) + 4, math.ceil(win.height) + 4)
+        try:
+            win = win.intersection(Window(0, 0, src.width, src.height))
+        except WindowError:
+            return None
+        data = src.read([1, 2, 3], window=win)
+        src_transform, src_crs = src.window_transform(win), src.crs
+    out = np.zeros((3, height, width), np.uint8)
+    reproject(data, out, src_transform=src_transform, src_crs=src_crs, dst_transform=transform,
+              dst_crs=crs, resampling=Resampling.bilinear, src_nodata=0, dst_nodata=0)
+    return out
+
+
 class NaipCache:
-    """Cell cache on disk: <root>/<gsd>/<key>.tif plus a JSON sidecar."""
+    """Cell cache on disk: <root>/gsd_<gsd>[_y<years>]/<key>.tif plus a JSON sidecar.
+
+    Sources limited to some NAIP years get their own directory, so changing
+    NAIPNAV_YEARS never silently reuses cells cached from other years.
+    """
 
     def __init__(self, root: str | os.PathLike, source: Source, gsd: float = 0.6):
         self.root = Path(root)
         self.source = source
         self.gsd = gsd
-        self.dir = self.root / f"gsd_{gsd:.2f}"
+        years = getattr(source, "years", None)
+        suffix = "_y" + "-".join(str(y) for y in sorted(years)) if years else ""
+        self.dir = self.root / f"gsd_{gsd:.2f}{suffix}"
         self.dir.mkdir(parents=True, exist_ok=True)
 
     def path(self, cell: Cell) -> Path:
@@ -213,13 +259,11 @@ class NaipCache:
                 if filled.all():
                     break
                 try:
-                    with rasterio.open(scene.href) as src, WarpedVRT(
-                        src, crs=crs, transform=transform, width=width, height=height,
-                        resampling=Resampling.bilinear, nodata=0,
-                    ) as vrt:
-                        data = vrt.read([1, 2, 3])
+                    data = read_scene(scene.href, crs, transform, width, height)
                 except rasterio.errors.RasterioIOError as exc:
                     log.warning("skipping %s: %s", scene.href, exc)
+                    continue
+                if data is None:
                     continue
                 valid = data.any(axis=0) & ~filled
                 if not valid.any():
@@ -229,7 +273,7 @@ class NaipCache:
                 used.append({"id": scene.id, "year": scene.year})
         if not used:
             return None
-        tmp = dst.with_suffix(".tmp.tif")
+        tmp = dst.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp.tif")
         with rasterio.open(
             tmp, "w", driver="GTiff", width=width, height=height, count=3, dtype="uint8",
             crs=crs, transform=transform, nodata=0, tiled=True, blockxsize=256, blockysize=256,

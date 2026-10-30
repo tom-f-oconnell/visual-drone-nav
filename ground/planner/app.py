@@ -7,6 +7,7 @@ Environment variables:
   NAIPNAV_GSD      cache resolution in metres (default 0.6)
   NAIPNAV_SOURCE   "pc" (Planetary Computer, default) or a path to local NAIP GeoTIFFs
   NAIPNAV_YEARS    optional comma separated NAIP years to allow, e.g. "2021,2022"
+  NAIPNAV_FETCH_THREADS  cells downloaded in parallel (default 6)
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ DATA = Path(os.environ.get("NAIPNAV_DATA", "data")).resolve()
 GSD = float(os.environ.get("NAIPNAV_GSD", "0.6"))
 SOURCE = os.environ.get("NAIPNAV_SOURCE", "pc")
 YEARS = [int(y) for y in os.environ.get("NAIPNAV_YEARS", "").split(",") if y.strip()]
+FETCH_THREADS = int(os.environ.get("NAIPNAV_FETCH_THREADS", "6"))
 
 STATIC = Path(__file__).parent / "static"
 MISSIONS = DATA / "missions"
@@ -129,21 +131,27 @@ def export_bundle(mission: Mission):
 
 
 # NAIP cache ----------------------------------------------------------------
+def _fetch_cell(job: dict, cell: Cell):
+    if job["cancel"]:
+        return
+    try:
+        path = cache.fetch(cell)
+        with _jobs_lock:
+            job["done"] += 1
+            if path is None:
+                job["no_coverage"].append(cell.key)
+    except Exception as exc:  # noqa: BLE001  keep going, report per cell
+        with _jobs_lock:
+            job["done"] += 1
+            job["errors"].append(f"{cell.key}: {exc}")
+
+
 def _run_job(job_id: str, cells: list[Cell]):
     job = _jobs[job_id]
-    for cell in cells:
-        if job["cancel"]:
-            break
-        try:
-            path = cache.fetch(cell)
-            with _jobs_lock:
-                job["done"] += 1
-                if path is None:
-                    job["no_coverage"].append(cell.key)
-        except Exception as exc:  # noqa: BLE001  keep going, report per cell
-            with _jobs_lock:
-                job["done"] += 1
-                job["errors"].append(f"{cell.key}: {exc}")
+    # Fetches are latency bound (NAIP on Planetary Computer is stored in West
+    # Europe), so several cells in flight at once is much faster.
+    with ThreadPoolExecutor(max_workers=FETCH_THREADS) as pool:
+        list(pool.map(lambda c: _fetch_cell(job, c), cells))
     job["state"] = "cancelled" if job["cancel"] else "finished"
 
 

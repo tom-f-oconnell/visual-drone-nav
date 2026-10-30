@@ -31,7 +31,10 @@ uvicorn planner.app:app --port 8000      # open http://localhost:8000
 Settings (environment variables): `NAIPNAV_DATA` (data dir), `NAIPNAV_GSD`
 (cache resolution, default 0.6 m), `NAIPNAV_SOURCE` (`pc` for Planetary Computer,
 or a directory of NAIP GeoTIFFs you downloaded, e.g. from USGS EarthExplorer),
-`NAIPNAV_YEARS` (limit to NAIP years, e.g. `2022,2023`).
+`NAIPNAV_YEARS` (limit to NAIP years, e.g. `2022,2023`; cached separately from
+the default newest-first cache), `NAIPNAV_FETCH_THREADS` (cells downloaded in
+parallel, default 6). Caching takes roughly 5 to 10 s per cell from Planetary
+Computer (the imagery is stored in West Europe).
 
 The planner warns when the camera footprint is too small for reliable matching.
 Rule of thumb: the footprint should be at least ~250 map pixels (~150 m at
@@ -109,6 +112,16 @@ stretches shaded. Orbit, chase and top views; drag to rotate, right-drag or
 shift-drag to pan, wheel or pinch to zoom, double-click to follow again.
 `--export` writes one self-contained HTML file that replays the flight anywhere.
 
+By default camera frames are rendered from the same imagery the navigator
+matches against, which is optimistic. For a more honest test, export the same
+mission a second time from a different NAIP year and render the camera from it
+with `--world` (`sim` takes it too):
+
+```bash
+NAIPNAV_YEARS=2023 NAIPNAV_GSD=0.3 uvicorn planner.app:app --port 8001   # export the mission again
+visnav sim3d --bundle ~/missions/mission1 --world ~/missions/mission1_2023/map.tif
+```
+
 To watch ArduPilot SITL (or a real vehicle) instead of the built-in model:
 
 ```bash
@@ -142,6 +155,7 @@ to check the autopilot integration.
 ## Tests
 
 ```bash
+python3 -m venv venv && . venv/bin/activate
 pip install -r ground/requirements.txt pymavlink pytest
 pytest tests
 ```
@@ -152,19 +166,33 @@ pytest tests
   and exports the 3D replay.
 * `test_mavlink.py` uploads a mission and sends GPS_INPUT to a fake flight
   controller over UDP, and checks the 3D viewer can follow it.
+* `test_naip.py` checks cached cells land exactly on the UTM grid, including
+  when read from a COG overview.
 
-The development sandbox could not reach NAIP servers, so these tests use a
-procedurally generated stand-in for NAIP. To run the same test on real
-imagery, download NAIP GeoTIFFs and set
+The tests use a procedurally generated stand-in for NAIP, so they run offline.
+To run the same test on real imagery, download NAIP GeoTIFFs and set
 `NAIPNAV_TEST_NAIP=<dir> NAIPNAV_TEST_LAT=<lat> NAIPNAV_TEST_LON=<lon>`.
 
 ## Known limits and next steps
 
+* **Matching across NAIP years is the main open problem.** With real NAIP at
+  three sites (Boulder foothills, east Boulder County farms and suburbs, central
+  Iowa row crops), a 2021 map and camera frames rendered from 2023 imagery
+  (`--world`), ORB found the right place in 0 to 50% of frames even given the
+  true position, and the closed-loop sim diverged (median error 11 to 245 m, or
+  no lock at all). The same flights over the map's own imagery gave 2 to 3 m.
+  Area correlation of gradient orientations at 2.4 m/px did better in a quick
+  test (82% vs 50% in the foothills) but needs a confidence measure that rejects
+  wrong peaks over farmland. A learned matcher (SuperPoint + LightGlue under
+  TensorRT on the Jetson) is the other route; `FeatureBackend` is the seam.
+* No position is sent until vision locks (about 65 m AGL with a 90° lens), so
+  ArduPilot cannot arm in AUTO, or hold position low on takeoff and landing, on
+  vision alone. A seeded position on the ground (the bundle's home) or a real
+  GPS below lock height is needed.
 * Flat-terrain assumption. In hilly areas, use the rangefinder or add a DEM
   (Copernicus 30 m) to get height above the ground under the camera.
 * NAIP is flown every 2 to 3 years in summer. Snow, harvest and new construction
-  reduce matches. A learned matcher (SuperPoint + LightGlue under TensorRT on the
-  Jetson) is the upgrade path; `FeatureBackend` is the seam for it.
+  reduce matches further.
 * Over water, forest canopy or uniform fields there may be no fixes. Plan routes
   over textured ground, and keep the corridor wide enough for drift.
 * GPS_INPUT reuses ArduPilot's GPS path, which is the simplest integration.
