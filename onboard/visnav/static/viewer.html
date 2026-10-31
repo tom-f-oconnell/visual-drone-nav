@@ -264,12 +264,19 @@ function onNewRecord() {
   truthLine.geometry.attributes.position.needsUpdate = true;
   estLine.geometry.attributes.position.needsUpdate = true;
   fixPts.geometry.attributes.position.needsUpdate = true;
-  if (live && follow) t = duration();
   drawSpark();
 }
 
+// Records arrive in bursts, so play a steady second or so behind the newest one rather than jumping to each.
+let liveRate = 0;
+function advanceLive(dt) {
+  liveRate += ((duration() - t) - liveRate) * (1 - Math.exp(-dt / 0.5));
+  t = Math.min(t + liveRate * dt, duration());
+}
+
 function fmt(s) { s = Math.max(0, Math.floor(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
-let lastThumb = null;
+const wrapPi = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+let lastThumb = null, heading = 0;
 function update() {
   if (!records.length) return;
   const i = idxAt(t), r = records[i], nx = records[Math.min(i + 1, records.length - 1)];
@@ -277,14 +284,16 @@ function update() {
   const f = nx.t > r.t ? Math.min(Math.max((t - r.t) / (nx.t - r.t), 0), 1) : 0;
   const lerp = (a, b) => a + (b - a) * f;
   const p = [0, 1, 2].map((k) => lerp(r.p[k], nx.p[k]));
+  heading = r.att[2] + wrapPi(nx.att[2] - r.att[2]) * f;
+  const att = [lerp(r.att[0], nx.att[0]), lerp(r.att[1], nx.att[1]), heading];
   drone.position.copy(V(p[0], p[1], p[2] + 1));
   drone.rotation.set(0, 0, 0);
   // ENU/three: yaw clockwise from north = rotation about -y; pitch nose-up = about +x; roll right = about -z
   drone.rotation.order = "YXZ";
-  drone.rotation.y = -r.att[2]; drone.rotation.x = r.att[1]; drone.rotation.z = -r.att[0];
+  drone.rotation.y = -att[2]; drone.rotation.x = att[1]; drone.rotation.z = -att[0];
 
   setRange(truthLine.geometry, i + 1); setRange(estLine.geometry, i + 1); setRange(fixPts.geometry, r.fixIdx);
-  const c = corners({ p, att: r.att });
+  const c = corners({ p, att });
   const fpA = footprint.geometry.attributes.position.array, frA = frustum.geometry.attributes.position.array;
   c.forEach((v, k) => { fpA.set([v.x, v.y, v.z], k * 3); frA.set([drone.position.x, drone.position.y, drone.position.z, v.x, v.y, v.z], k * 6); });
   footprint.geometry.attributes.position.needsUpdate = true; frustum.geometry.attributes.position.needsUpdate = true;
@@ -338,14 +347,20 @@ function drawSpark() {
 }
 
 // ---------- Camera control: orbit, chase, top ----------
-const view = { mode: "orbit", target: new THREE.Vector3(), dist: 1200, az: -0.6, el: 0.6 };
-function placeCamera() {
+const view = { mode: "orbit", target: new THREE.Vector3(), dist: 1200, az: -0.6, el: 0.6,
+               yaw: 0, offset: new THREE.Vector3(), aim: new THREE.Vector3() };
+function placeCamera(dt) {
   const d = drone.position;
   if (view.mode === "chase") {
-    const r = records[idxAt(t)] || { att: [0, 0, 0] };
-    const yaw = r.att[2], back = 50, up = 24;
-    camera.position.lerp(new THREE.Vector3(d.x - Math.sin(yaw) * back, d.y + up, d.z + Math.cos(yaw) * back), 0.08);
-    camera.lookAt(d.x + Math.sin(yaw) * 60, Math.max(d.y - 30, 0), d.z - Math.cos(yaw) * 60);
+    // The camera moves rigidly with the drone and only its offset and aim are eased. Easing the
+    // camera's position but not its aim would tilt the view whenever the drone moved.
+    const k = 1 - Math.exp(-dt / 0.5);
+    view.yaw += wrapPi(heading - view.yaw) * k;
+    const s = Math.sin(view.yaw), c = Math.cos(view.yaw), back = 50, up = 24, ahead = 60, below = 30;
+    view.offset.lerp(new THREE.Vector3(-s * back, up, c * back), k);
+    view.aim.lerp(new THREE.Vector3(s * ahead, -below, -c * ahead), k);
+    camera.position.copy(d).add(view.offset);
+    camera.lookAt(d.x + view.aim.x, Math.max(d.y + view.aim.y, 0), d.z + view.aim.z);
     return;
   }
   if (view.mode === "top") { view.el = 1.5; }
@@ -356,6 +371,11 @@ function placeCamera() {
   camera.lookAt(view.target);
 }
 function setMode(m) {
+  if (m === "chase" && view.mode !== "chase" && drone) {  // ease in from wherever the camera is now
+    view.yaw = heading;
+    view.offset.copy(camera.position).sub(drone.position);
+    view.aim.copy(view.target).sub(drone.position);
+  }
   view.mode = m; if (m === "orbit") view.el = 0.6;
   ["orbit", "chase", "top"].forEach((k) => $("v-" + k).setAttribute("aria-pressed", String(k === m)));
 }
@@ -406,9 +426,10 @@ addEventListener("resize", resize);
 
 function loop(now) {
   const dt = Math.min((now - lastFrame) / 1000, 0.1); lastFrame = now;
-  if (playing && !scrubbing && !(live && follow)) t = Math.min(t + dt * speed, duration());
+  if (live && follow) { if (!scrubbing) advanceLive(dt); }
+  else if (playing && !scrubbing) t = Math.min(t + dt * speed, duration());
   if (playing && t >= duration() && !live && records.length) { playing = false; $("play").textContent = "Replay"; }
-  update(); placeCamera();
+  update(); placeCamera(dt);
   if (performance.now() - (drawSpark.at || 0) > 250) drawSpark();
   renderer.render(world, camera);
   requestAnimationFrame(loop);
