@@ -129,6 +129,42 @@ def check_plan(mission: Mission):
     }
 
 
+def _cached_years(cells: list[Cell]) -> set[int]:
+    return {s["year"] for c in cells for s in (cache.meta(c) or {"scenes": []})["scenes"] if s["year"]}
+
+
+def _naip_label(years) -> str:
+    return "NAIP " + (", ".join(str(y) for y in sorted(years, reverse=True)) or "year unknown")
+
+
+@app.post("/api/plan/imagery")
+def plan_imagery(mission: Mission):
+    """Short label for which NAIP years the route's imagery is, or would be, from.
+
+    Only asks the imagery source if some cells are not cached. Cells are filled
+    newest first, so its answer for those is the newest year near the route.
+    """
+    default = _naip_label(YEARS) if YEARS else "Newest NAIP available"
+    if not mission.waypoints:
+        return {"label": default}
+    cells = mission.required_cells()
+    cached = _cached_years(cells)
+    if all(cache.has(c) for c in cells):
+        return {"label": _naip_label(cached)}
+    try:
+        years = [scene.year for scene in source.scenes(mission.corridor()[1].bounds)]
+    except Exception:  # noqa: BLE001  e.g. offline: say what is known
+        years = None
+    newest = max(years or [0])
+    if not newest:
+        label = f"{_naip_label(cached)} cached" if cached else "No NAIP here" if years == [] else default
+    elif cached - {newest}:
+        label = f"{_naip_label(cached)} cached, {newest} for the rest"
+    else:
+        label = _naip_label({newest})
+    return {"label": label}
+
+
 @app.get("/api/missions/{name}/mission.waypoints", response_class=PlainTextResponse)
 def export_wpl(name: str):
     return get_mission(name).to_wpl()
@@ -225,9 +261,8 @@ def sim_years(mission: Mission):
     if not mission.waypoints:
         return {"years": []}
     _, poly_ll = mission.corridor()
-    all_years = {scene.year for scene in _source().scenes(poly_ll.bounds)}
-    map_years = {s["year"] for c in mission.required_cells() for s in (cache.meta(c) or {"scenes": []})["scenes"]}
-    return {"years": sorted(all_years - map_years, reverse=True)}
+    all_years = {scene.year for scene in _source().scenes(poly_ll.bounds) if scene.year}
+    return {"years": sorted(all_years - _cached_years(mission.required_cells()), reverse=True)}
 
 
 @app.get("/api/sim/runs")

@@ -26,6 +26,7 @@ uvicorn planner.app:app --port 8347      # open http://localhost:8347
 2. **Cache NAIP for route** downloads every 0.01 degree cell that the corridor touches.
    Reads are windowed range requests against the Planetary Computer COGs, so only
    the needed pixels are fetched. Cells are kept in `data/naip/` and reused across missions.
+   The button names the NAIP year the route uses.
 3. **Run simulation** flies the route GPS-denied and shows the flight live in 3D,
    then the error statistics. Choose another NAIP year as the camera imagery for a
    realistic result: with the map's own imagery the matching is too easy. That

@@ -1,4 +1,4 @@
-"""Running and viewing simulations from the planner website."""
+"""Running and viewing simulations from the planner website, and what it says about the imagery."""
 
 import importlib
 import json
@@ -118,6 +118,40 @@ def test_mission_without_landing_ends_at_last_waypoint(client):
     assert run["state"] == "finished", run
     assert run["summary"]["mission_complete"] and not run["summary"]["landed"], run
     assert run["summary"]["duration_s"] < 200, run
+
+
+def test_imagery_label_names_the_naip_year(client, monkeypatch):
+    import planner.app
+    from planner.mission import Mission
+
+    def label(m):
+        return client.post("/api/plan/imagery", json=m).json()["label"]
+
+    longer = {**mission(), "waypoints": [*mission()["waypoints"], {"lat": LAT + 0.009, "lon": LON}]}
+    outside = {**mission(), "waypoints": [{"lat": 44.0, "lon": -100.0}, {"lat": 44.01, "lon": -100.0}]}
+    assert label({**mission(), "waypoints": []}) == "Newest NAIP available"
+    assert label(mission()) == "NAIP 2022"  # cached
+    assert label(longer) == "NAIP 2022"  # partly cached, the source's newest for the rest
+    assert label(outside) == "No NAIP here"
+
+    # Cells cached from an older year stay as they are: say so.
+    sidecars = [planner.app.cache.path(c).with_suffix(".json") for c in Mission.model_validate(mission()).required_cells()]
+    originals = [p.read_text() for p in sidecars]
+    try:
+        for p, text in zip(sidecars, originals):
+            p.write_text(json.dumps({**json.loads(text), "scenes": [{"id": "old", "year": 2019}]}))
+        assert label(mission()) == "NAIP 2019"
+        assert label(longer) == "NAIP 2019 cached, 2022 for the rest"
+
+        def offline(bbox):
+            raise OSError("no network")
+
+        monkeypatch.setattr(planner.app.source, "scenes", offline)
+        assert label(longer) == "NAIP 2019 cached"
+        assert label(outside) == "Newest NAIP available"
+    finally:
+        for p, text in zip(sidecars, originals):
+            p.write_text(text)
 
 
 def test_refusals(client):

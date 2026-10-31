@@ -97,7 +97,21 @@ function check() {
     routeCached = Boolean(res.cells && res.cached === res.cells);
     $("export").disabled = !routeCached;
     updateSimButton();
+    refreshImagery(res.cached);
   }, 250);
+}
+
+// Which NAIP years the route uses. The server may have to ask the imagery source, so only when this can change.
+let imageryKey = null;
+async function refreshImagery(cached) {
+  const m = mission();
+  const key = JSON.stringify([m.waypoints, m.corridor_m, cached]);
+  if (key === imageryKey) return;
+  imageryKey = key;
+  try {
+    const { label } = await (await api("/api/plan/imagery", { method: "POST", body: JSON.stringify(m) })).json();
+    if (key === imageryKey) $("naip_years").textContent = label;
+  } catch (e) { imageryKey = null; console.warn(e); }
 }
 
 $("cache").onclick = async () => {
