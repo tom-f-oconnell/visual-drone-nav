@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 from pyproj import Geod
 
+from .appearance import Appearance, CameraLook
 from .geo import MapRaster
 from .matcher import ChainMatcher, CorrMatcher, FeatureBackend, MapMatcher
 from .navigator import Navigator
@@ -38,6 +39,13 @@ def load_bundle(path: str):
 def load_world(args, map_: MapRaster) -> MapRaster:
     """Imagery to render simulated camera frames from: --world, else the bundle map."""
     return MapRaster.load(args.world) if args.world else map_
+
+
+def appearance_from_args(args) -> Appearance:
+    try:
+        return Appearance.parse(args.appearance, getattr(args, "seed", None))
+    except ValueError as exc:
+        raise SystemExit(f"--appearance: {exc}") from exc
 
 
 def camera_from_args(args, meta) -> CameraModel:
@@ -80,7 +88,9 @@ def cmd_run(args):
     if args.camera == "sitl":
         from .camera import SitlCamera
 
-        grabber = SitlCamera(ap, load_world(args, map_), cam)
+        look = CameraLook(appearance_from_args(args))
+        print("camera appearance:", look.appearance.changes() or "unchanged")
+        grabber = SitlCamera(ap, load_world(args, map_), cam, look=look)
         args.latency = 0.0
     else:
         grabber = FrameGrabber(args.camera, cam.width, cam.height)
@@ -149,6 +159,7 @@ def cmd_sim(args):
     world = load_world(args, map_)
     cam = camera_from_args(args, meta)
     rng = np.random.default_rng(args.seed)
+    look = CameraLook(appearance_from_args(args), [args.seed, 1])
     route = [(w["lat"], w["lon"], w["alt"] or meta["mission"]["default_alt"]) for w in meta["mission"]["waypoints"]]
     # Start the filter from a deliberately wrong position to exercise acquisition.
     lon0, lat0, _ = GEOD.fwd(route[0][1], route[0][0], rng.uniform(0, 360), args.start_error)
@@ -159,7 +170,7 @@ def cmd_sim(args):
         if args.frames and n >= args.frames:
             break
         n += 1
-        img = render(world, cam, pose.lat, pose.lon, pose.h, pose.roll, pose.pitch, pose.yaw, rng)
+        img = look(render(world, cam, pose.lat, pose.lon, pose.h, pose.roll, pose.pitch, pose.yaw), pose.t)
         roll, pitch, yaw, h = sensors(pose.t, pose.roll, pose.pitch, pose.yaw, pose.h)
         t0 = time.perf_counter()
         fix = nav.process(img, pose.t, roll, pitch, yaw, h)
@@ -177,6 +188,7 @@ def cmd_sim(args):
         "err_p95_m": round(float(np.percentile(e, 95)), 2) if len(e) else None,
         "err_max_m": round(float(e.max()), 2) if len(e) else None,
         "ms_per_frame": round(1000 * float(np.mean(comp)), 1),
+        "appearance": look.appearance.changes(),
     }
     print(json.dumps(report, indent=2))
     return report
@@ -210,7 +222,7 @@ def cmd_sim3d(args):
     cam = camera_from_args(args, meta)
     nav = build_navigator(args, meta, map_, cam)
     cfg = SimConfig(seed=args.seed, camera_hz=args.camera_hz, wind=(args.wind_e, args.wind_n),
-                    gust_sigma=args.gust, min_vision_alt=args.min_alt)
+                    gust_sigma=args.gust, min_vision_alt=args.min_alt, appearance=appearance_from_args(args))
     sim = FlightSim(map_, cam, nav, meta, cfg, world=load_world(args, map_))
     feed = FlightFeed(sim.scene(), map_texture(map_))
     if args.port:
@@ -291,13 +303,17 @@ def main(argv=None):
                         help="m AGL below which frames are not matched to the map, only used for odometry")
         sp.add_argument("-v", "--verbose", action="store_true")
 
-    def world_arg(sp):
+    def simulated_camera(sp):
         sp.add_argument("--world", help="GeoTIFF to render camera frames from (default: the bundle map), "
                                         "e.g. the map.tif of the same mission exported from another NAIP year")
+        sp.add_argument("--appearance", default="",
+                        help='how simulated frames differ from that imagery: "name=value,..." with gamma, red, green, '
+                             "blue, blur, noise, brightness_drift, color_drift, gamma_drift, drift_tau_s, or "
+                             '"random" for realistic values (from --seed where there is one). Default: no change')
 
     r = sub.add_parser("run", help="fly: camera + MAVLink")
     common(r)
-    world_arg(r)
+    simulated_camera(r)
     r.add_argument("--mavlink", default="/dev/ttyTHS1")
     r.add_argument("--baud", type=int, default=921600)
     r.add_argument("--camera", default="csi", help='"csi", "csi:N", V4L2 index, GStreamer pipeline, file, or "sitl"')
@@ -313,7 +329,7 @@ def main(argv=None):
 
     s = sub.add_parser("sim", help="synthetic flight over the bundle map")
     common(s)
-    world_arg(s)
+    simulated_camera(s)
     s.add_argument("--rate", type=float, default=2.0, help="frames per second of flight")
     s.add_argument("--frames", type=int, default=0)
     s.add_argument("--seed", type=int, default=0)
@@ -332,7 +348,7 @@ def main(argv=None):
 
     f = sub.add_parser("sim3d", help="closed-loop flight simulation with a 3D viewer")
     common(f)
-    world_arg(f)
+    simulated_camera(f)
     f.add_argument("--seed", type=int, default=0)
     f.add_argument("--camera-hz", type=float, default=4.0)
     f.add_argument("--wind-e", type=float, default=3.0, help="m/s wind toward east")

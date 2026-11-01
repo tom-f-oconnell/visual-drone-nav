@@ -61,6 +61,7 @@ class SimOptions(BaseModel):
     gust: float = Field(1.5, ge=0, le=15, description="m/s")
     realtime: float = Field(0.0, ge=0, le=100, description="multiple of real time, 0 for as fast as possible")
     world_year: int | None = Field(None, description="render the camera from this NAIP year instead of the map")
+    appearance: dict[str, float] = Field(default_factory=dict, description="visnav.appearance.Appearance fields to change")
 
 
 class SimRequest(BaseModel):
@@ -119,6 +120,8 @@ class SimRuns:
             # Wind "from" a direction blows toward the opposite one.
             speed, frm = options.wind_speed, math.radians(options.wind_from_deg)
             cmd += ["--wind-e", f"{-speed * math.sin(frm):.3f}", "--wind-n", f"{-speed * math.cos(frm):.3f}"]
+            if options.appearance:
+                cmd += ["--appearance", ",".join(f"{k}={v}" for k, v in options.appearance.items())]
             if options.world_year:
                 cmd += ["--world", str(self._build_world(mission, options.world_year, bundle, live))]
             with self._lock:

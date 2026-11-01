@@ -102,7 +102,8 @@ def test_cache_and_export_then_fly(client, tmp_path):
 
     from visnav.main import main
     # Typical EKF3 roll/pitch error; at 120 m each degree moves fixes ~2 m (see README).
-    report = main(["sim", "--bundle", str(bundle), "--rate", "1", "--seed", "1", "--att-noise", "0.5"])
+    report = main(["sim", "--bundle", str(bundle), "--rate", "1", "--seed", "1", "--att-noise", "0.5",
+                   "--appearance", "random"])
     assert report["fix_rate"] > 0.8, report
     assert report["err_median_m"] < 3.0, report
     assert report["err_p95_m"] < 8.0, report
@@ -112,6 +113,7 @@ def test_closed_loop_flight_sim(client, tmp_path):
     """The simulated vehicle takes off, flies a short mission and lands on vision alone."""
     import json
 
+    from visnav.appearance import Appearance
     from visnav.flightsim import FlightSim, SimConfig, map_texture
     from visnav.main import main as visnav_main  # noqa: F401  (CLI import smoke test)
     from visnav.matcher import CorrMatcher
@@ -134,7 +136,7 @@ def test_closed_loop_flight_sim(client, tmp_path):
     map_ = MapRaster.load(bundle / "map.tif")
     cam = CameraModel.from_hfov(960, 600, 90)
     nav = Navigator(map_, cam, CorrMatcher(map_), meta["home"]["lat"], meta["home"]["lon"], start_sigma_m=5.0)
-    sim = FlightSim(map_, cam, nav, meta, SimConfig(camera_hz=2.0, seed=5, att_noise_deg=0.5))
+    sim = FlightSim(map_, cam, nav, meta, SimConfig(camera_hz=2.0, seed=5, att_noise_deg=0.5, appearance=Appearance.parse("random", 5)))
     records, summary = sim.run()
     assert summary["landed"], summary
     assert summary["fix_rate"] > 0.7, summary

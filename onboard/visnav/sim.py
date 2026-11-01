@@ -1,11 +1,10 @@
 """Synthetic camera frames rendered from the map, for bench testing without a drone.
 
 `render` produces what the downward camera would see at a given pose by
-projecting the map through the inverse of the orthorectification. Photometric
-changes (gamma, colour cast, blur, noise) stand in for season, lighting and
-sensor differences between the NAIP flight and today. Below the map's
-resolution a procedural ground texture, fixed to the ground, stands in for the
-grass and gravel a real camera sees low down, so odometry has something to track.
+projecting the map through the inverse of the orthorectification. Below the
+map's resolution a procedural ground texture, fixed to the ground, stands in for
+the grass and gravel a real camera sees low down, so odometry has something to
+track. Differences in lighting, season and sensor are `appearance.CameraLook`'s job.
 """
 
 from __future__ import annotations
@@ -57,8 +56,7 @@ def warm_up():
         detail_tile(level)
 
 
-def render(map_: MapRaster, cam: CameraModel, lat, lon, h, roll, pitch, yaw,
-           rng: np.random.Generator | None = None, photometric: bool = True, detail: float = 0.12) -> np.ndarray:
+def render(map_: MapRaster, cam: CameraModel, lat, lon, h, roll, pitch, yaw, *, detail: float = 0.12) -> np.ndarray:
     """Camera frame (BGR) at a pose; detail is the contrast of the procedural ground texture."""
     J = map_.ned_to_px_jacobian(lat, lon)
     col, row = map_.ll_to_px(lat, lon)
@@ -78,14 +76,6 @@ def render(map_: MapRaster, cam: CameraModel, lat, lon, h, roll, pitch, yaw,
         tex = cv2.warpPerspective(tile, M, (cam.width, cam.height),
                                   flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
         img = np.clip(img * (1 + detail * tex[..., None]), 0, 255).astype(np.uint8)
-    if photometric:
-        rng = rng or np.random.default_rng()
-        f = img.astype(np.float32) / 255
-        f = f ** rng.uniform(0.75, 1.3)
-        f *= rng.uniform(0.85, 1.15, size=3)
-        f = cv2.GaussianBlur(f, (0, 0), rng.uniform(0.5, 1.5))
-        f += rng.normal(0, 0.02, f.shape)
-        img = np.clip(f * 255, 0, 255).astype(np.uint8)
     return img
 
 

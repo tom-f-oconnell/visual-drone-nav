@@ -265,6 +265,19 @@ def sim_years(mission: Mission):
     return {"years": sorted(all_years - _cached_years(mission.required_cells()), reverse=True)}
 
 
+@app.get("/api/sim/appearance/random")
+def random_sim_appearance():
+    """One realistic stand-in for lighting, season and sensor differences."""
+    if not simulator_available():
+        raise HTTPException(503, "the simulator is not installed: pip install -e onboard --no-deps")
+    from dataclasses import asdict
+
+    import numpy as np
+    from visnav.appearance import Appearance
+
+    return asdict(Appearance.random(np.random.default_rng()))
+
+
 @app.get("/api/sim/runs")
 def list_sim_runs():
     return sim_runs.list()
@@ -276,6 +289,12 @@ def start_sim_run(req: SimRequest):
         raise HTTPException(503, "the simulator is not installed: pip install -e onboard --no-deps")
     if len(req.mission.waypoints) < 2:
         raise HTTPException(400, "need at least two waypoints")
+    from visnav.appearance import Appearance
+
+    try:
+        Appearance.from_dict(req.options.appearance)
+    except ValueError as exc:
+        raise HTTPException(422, f"camera appearance: {exc}") from exc
     missing = [c.key for c in req.mission.required_cells() if not cache.has(c)]
     if missing:
         raise HTTPException(409, f"{len(missing)} NAIP cells not cached yet; run 'Cache NAIP' first")

@@ -31,6 +31,9 @@ uvicorn planner.app:app --port 8347      # open http://localhost:8347
    then the error statistics. Choose another NAIP year as the camera imagery for a
    realistic result: with the map's own imagery the matching is too easy. That
    year is downloaded once and cached. Runs stay in `data/sim/` to replay.
+   The camera shows the imagery as it is, unless you press **Randomize** next to
+   *Camera appearance* or set values under *Adjust*: gamma, colour gains, blur and
+   noise for the whole flight, and how far they wander during it.
 4. **Export mission bundle** gives a zip with `mission.waypoints` (QGC WPL 110),
    `mission.json` and `map.tif` (UTM, RGB, 0.6 m).
 
@@ -135,6 +138,26 @@ NAIPNAV_YEARS=2023 NAIPNAV_GSD=0.3 uvicorn planner.app:app --port 8348   # expor
 visnav sim3d --bundle ~/missions/mission1 --world ~/missions/mission1_2023/map.tif
 ```
 
+Frames show that imagery unchanged unless `--appearance` (on `sim3d`, `sim` and
+`run --camera sitl`) says otherwise. It takes `random` (realistic values from
+`--seed`, printed in the summary) or any of these:
+
+```bash
+visnav sim3d --bundle ~/missions/mission1 --appearance gamma=1.1,red=1.05,blur=0.8,noise=0.01
+visnav sim3d --bundle ~/missions/mission1 --appearance brightness_drift=0.05,color_drift=0.02,drift_tau_s=120
+```
+
+| Name | Default | `random` draws from | Meaning |
+|---|---|---|---|
+| `gamma` | 1 | 0.75 to 1.3 | tone curve exponent, held all flight |
+| `red`, `green`, `blue` | 1 | 0.85 to 1.15 | channel gains (exposure, white balance), held all flight |
+| `blur` | 0 | 0.5 to 1.5 | softness, sigma in pixels |
+| `noise` | 0 | 0.005 to 0.02 | sensor noise, fraction of full scale, new each frame |
+| `brightness_drift` | 0 | 0 to 0.08 | slow wander of all channels together (standard deviation, as a fraction) |
+| `color_drift` | 0 | 0 to 0.03 | slow wander of each channel separately (same) |
+| `gamma_drift` | 0 | 0 to 0.05 | slow wander of gamma (same) |
+| `drift_tau_s` | 120 | 30 to 300 | seconds the wander takes (correlation time) |
+
 To watch ArduPilot SITL (or a real vehicle) instead of the built-in model:
 
 ```bash
@@ -183,6 +206,9 @@ python bench/match_bench.py DATA OUT --matchers orb corr lg:features=aliked
 python bench/report.py OUT
 ```
 
+Add `--appearance random` to `match_bench.py` to draw a different camera
+appearance for each site.
+
 Tests:
 
 ```bash
@@ -197,8 +223,11 @@ pytest tests
   controller over UDP, and checks the 3D viewer can follow it.
 * `test_matcher.py` covers the correlation matcher, matcher chains and the
   re-lock rule.
+* `test_appearance.py` checks simulated frames are untouched by default, that
+  offsets hold from frame to frame and drift stays slow, and that a look changes
+  nothing else in a flight.
 * `test_sim_web.py` runs, stops, replays and deletes simulations through the
-  planner's API, including a camera from another NAIP year.
+  planner's API, including a camera from another NAIP year and camera appearance.
 * `test_naip.py` checks cached cells land exactly on the UTM grid, including
   when read from a COG overview.
 * `test_odometry.py` checks odometry against known moves from 2 to 120 m, the

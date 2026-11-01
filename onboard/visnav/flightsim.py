@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from .appearance import Appearance, CameraLook
 from .geo import MapRaster
 from .navigator import Navigator
 from .ortho import CameraModel
@@ -59,6 +60,7 @@ class SimConfig:
     record_hz: float = 5.0
     max_time: float = 1800.0
     seed: int = 0
+    appearance: Appearance = Appearance()      # default: frames show the imagery as it is
 
 
 class AxisEKF:
@@ -112,6 +114,7 @@ class FlightSim:
         h, w = self.map.shape
         self.origin = np.array(self.map.px_to_grid(w / 2, h / 2))
         self.rng = np.random.default_rng(self.cfg.seed)
+        self.look = CameraLook(self.cfg.appearance, [self.cfg.seed, 1])
         m = self.meta["mission"]
         self.home = self._ll_to_local(self.meta["home"]["lat"], self.meta["home"]["lon"])
         wps = [(*self._ll_to_local(w["lat"], w["lon"]), w["alt"] or m["default_alt"]) for w in m["waypoints"]]
@@ -246,7 +249,7 @@ class FlightSim:
                 img = None
                 if tr.p[2] > 0.3:  # on the ground the camera sees only the landing gear's shadow
                     lat, lon = self._local_to_ll(tr.p[0], tr.p[1])
-                    img = render(self.world, self.cam, lat, lon, tr.p[2], tr.roll, tr.pitch, tr.yaw, self.rng)
+                    img = self.look(render(self.world, self.cam, lat, lon, tr.p[2], tr.roll, tr.pitch, tr.yaw), self.t)
                     frames += 1
                     map_frames += int(tr.p[2] >= cfg.min_vision_alt)
                 roll, pitch, yaw, h = self.sensors(self.t, tr.roll, tr.pitch, tr.yaw, tr.p[2])
@@ -305,6 +308,7 @@ class FlightSim:
             "ekf_err_max_m": round(float(errs.max()), 2) if len(errs) else None,
             "ekf_err_below_map_alt_max_m": round(float(low.max()), 2) if len(low) else None,
             "landing_error_m": round(float(np.linalg.norm(self.truth.p[:2] - np.array(self.plan[-1][1:3]))), 2),
+            "appearance": cfg.appearance.changes(),
         }
         return records, summary
 

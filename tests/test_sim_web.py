@@ -154,11 +154,28 @@ def test_imagery_label_names_the_naip_year(client, monkeypatch):
             p.write_text(text)
 
 
+def test_camera_appearance(client):
+    """Unchanged unless asked; Randomize's values and hand-set ones reach the simulator, which reports them."""
+    from visnav.appearance import REALISTIC
+
+    values = client.get("/api/sim/appearance/random").json()
+    assert set(values) == set(REALISTIC)
+    assert all(REALISTIC[k][0] <= v <= REALISTIC[k][1] for k, v in values.items())
+    run_id = client.post("/api/sim/runs", json={"mission": mission("look"), "options": {"appearance": values}}).json()["id"]
+    run = wait_for(client, run_id, ("finished", "failed", "stopped"))
+    assert run["state"] == "finished", run
+    assert run["options"]["appearance"] == values
+    assert run["summary"]["appearance"] == values
+
+
 def test_refusals(client):
     assert client.post("/api/sim/runs", json={"mission": {**mission(), "waypoints": []}}).status_code == 400
     far = {**mission(), "waypoints": [{"lat": 44.0, "lon": -100.0}, {"lat": 44.01, "lon": -100.0}]}
     assert client.post("/api/sim/runs", json={"mission": far}).status_code == 409
     bad = {"mission": mission(), "options": {"wind_speed": -1}}
     assert client.post("/api/sim/runs", json=bad).status_code == 422
+    for look in ({"gamma": 0}, {"red": 99}, {"nonsense": 1}):
+        r = client.post("/api/sim/runs", json={"mission": mission(), "options": {"appearance": look}})
+        assert r.status_code == 422 and "camera appearance" in r.json()["detail"], r.text
     for path in ("/api/sim/runs/00000000", "/sim/00000000/", "/sim/00000000/events", "/api/sim/runs/..%2F..%2Fetc"):
         assert client.get(path).status_code == 404, path

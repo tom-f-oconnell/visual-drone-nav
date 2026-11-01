@@ -219,6 +219,35 @@ async function refreshYears() {
   } catch (e) { yearsKey = null; console.warn(e); }
 }
 
+// Camera appearance: each field's value in the page is the one that changes nothing.
+const lookInputs = [...document.querySelectorAll("[data-look]")];
+
+function lookValues() {
+  const out = {};
+  lookInputs.forEach((el) => { if (+el.value !== +el.defaultValue) out[el.dataset.look] = +el.value; });
+  return out;
+}
+
+function showLookState() {
+  const changed = Object.keys(lookValues()).some((name) => name !== "drift_tau_s");
+  $("look_state").textContent = changed ? "changed" : "as the imagery";
+}
+
+lookInputs.forEach((el) => { el.oninput = showLookState; });
+
+$("look_reset").onclick = () => {
+  lookInputs.forEach((el) => { el.value = el.defaultValue; });
+  showLookState();
+};
+
+$("look_random").onclick = async () => {
+  try {
+    const values = await (await api("/api/sim/appearance/random")).json();
+    lookInputs.forEach((el) => { el.value = values[el.dataset.look]; });
+    showLookState();
+  } catch (e) { alert(e.message); }
+};
+
 $("sim_run").onclick = async () => {
   $("sim_run").disabled = true;
   try {
@@ -226,6 +255,7 @@ $("sim_run").onclick = async () => {
       seed: +$("sim_seed").value, wind_speed: +$("sim_wind").value, wind_from_deg: +$("sim_wind_from").value,
       gust: +$("sim_gust").value, realtime: +$("sim_pace").value,
       world_year: $("sim_world").value ? +$("sim_world").value : null,
+      appearance: lookValues(),
     };
     const body = JSON.stringify({ mission: mission(), options });
     const run = await (await api("/api/sim/runs", { method: "POST", body })).json();
@@ -308,8 +338,10 @@ function resultText(run) {
     : s.mission_complete ? `Reached the last waypoint, ${s.landing_error_m} m off.` : "Ran out of time before finishing.";
   const note = run.options.world_year ? `Camera saw NAIP ${run.options.world_year}.`
     : "The camera saw the map's own imagery, so this is optimistic.";
+  const look = Object.entries(s.appearance || {}).map(([name, v]) => `${name.replace(/_/g, " ")} ${v}`).join(", ");
   return `${end} Position error: median ${s.ekf_err_median_m} m, 95% ${s.ekf_err_p95_m} m, ` +
-    `max ${s.ekf_err_max_m} m. Map fixes on ${Math.round(100 * s.fix_rate)}% of frames. ${note}`;
+    `max ${s.ekf_err_max_m} m. Map fixes on ${Math.round(100 * s.fix_rate)}% of frames. ${note}` +
+    (look ? ` Camera appearance: ${look}.` : "");
 }
 
 $("sim_stop").onclick = () => api(`/api/sim/runs/${openRun}/stop`, { method: "POST" }).catch((e) => alert(e.message));

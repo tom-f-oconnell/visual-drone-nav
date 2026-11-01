@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from pyproj import Geod
 
+from visnav.appearance import Appearance, CameraLook
 from visnav.geo import MapRaster
 from visnav.matcher import ChainMatcher, CorrMatcher, FeatureBackend, Fix, MapMatcher
 from visnav.navigator import Navigator
@@ -26,7 +27,8 @@ def world(tmp_path_factory):
 
 def frame_at(world, lat, lon, yaw_err_deg=0.0, seed=0, h=H):
     """Ortho of a nadir frame at (lat, lon), oriented using a heading wrong by yaw_err_deg."""
-    img = render(world, CAM, lat, lon, h, 0.0, 0.0, 0.0, np.random.default_rng(seed))
+    look = CameraLook(Appearance.random(np.random.default_rng(seed)), seed)
+    img = look(render(world, CAM, lat, lon, h, 0.0, 0.0, 0.0))
     J = world.ned_to_px_jacobian(lat, lon)
     return orthorectify(CAM.undistort(img), CAM, 0.0, 0.0, math.radians(yaw_err_deg), h, J)
 
@@ -113,7 +115,7 @@ def test_only_strong_fixes_relock_the_filter(world, strong):
     """Far from the filter's estimate, fixes are rejected; three rejects and a strong fix move the filter."""
     far = world.ll_to_px(*offset(LAT, LON, 200, 0))
     nav = Navigator(world, CAM, Fixed(make_fix(*far, strong=strong)), LAT, LON, start_sigma_m=5.0)
-    img = render(world, CAM, LAT, LON, H, 0.0, 0.0, 0.0, np.random.default_rng(0))
+    img = render(world, CAM, LAT, LON, H, 0.0, 0.0, 0.0)
     for i in range(8):
         nav.process(img, i * 0.25, 0.0, 0.0, 0.0, H)
     err = GEOD.inv(LON, LAT, nav.state(2.0).lon, nav.state(2.0).lat)[2]

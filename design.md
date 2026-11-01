@@ -104,6 +104,17 @@ alternative.
 * **`--world`** renders the camera from other imagery than the map, e.g.
   another NAIP year. Without it, sims match the map against itself and are
   optimistic.
+* **`--appearance`** (Camera appearance in the planner). Frames show the imagery
+  as it is by default. Offsets to gamma, channel gains, blur and noise hold for
+  the whole flight, as a stand-in for lighting, season and sensor differences from
+  the NAIP flight. Brightness, colour and gamma can also wander (Gauss-Markov, from
+  the offsets, 120 s by default), as clouds pass and auto exposure and white balance
+  follow them. Only sensor noise is new each frame, and it does not move a frame's
+  average. The renderer used to draw a new colour cast and gamma for every frame,
+  which a real camera does not do, see below. `random`'s ranges
+  (`onboard/visnav/appearance.py`) are judged from typical camera behaviour, not
+  measured from flight footage. Not modelled: exposure following what is in the
+  frame, cloud shadows within a frame.
 * **SITL** (`--camera sitl`) renders frames with the attitude visnav is told,
   not SIMSTATE's true attitude: the two come on different MAVLink streams and
   their timing jitter (up to a degree while yawing) alone swamped odometry.
@@ -155,6 +166,18 @@ site unless noted:
   frames per height (three rotations, 40 m search), a score of 2.6 gives no
   errors over 20 m at 90 m and up, but 0.1% at 60 m and 0.4% at 40 m, so small
   footprints are not matched. Odometry is accurate there anyway.
+
+The results in this file, except the table below, were measured when every frame
+got its own random colour cast and gamma. That moved red/green by a typical 12%
+between frames, against 0.2% from the ground passing below. Taking it out made no
+clear difference to navigation on the one route checked, 5 km of suburbs near
+Pasadena at 120 m with a NAIP 2022 map, four seeds per cell, sim3d, mean over seeds.
+Median / p95 / landing error; 93% of frames got a fix in every cell:
+
+| camera imagery | per-frame cast (old) | no change (default) | `random` |
+|---|---|---|---|
+| NAIP 2020 | 3.9 / 8.2 / 3.1 m | 3.7 / 7.6 / 2.7 m | 3.8 / 7.7 / 2.4 m |
+| NAIP 2012 | 4.6 / 10.4 / 3.0 m | 5.3 / 10.6 / 3.1 m | 5.4 / 10.6 / 3.0 m |
 
 ## Matcher benchmark (`bench/`)
 

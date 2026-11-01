@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from pyproj import Geod
 
+from visnav.appearance import Appearance, CameraLook
 from visnav.filter import PositionFilter
 from visnav.geo import MapRaster
 from visnav.matcher import MapMatcher
@@ -30,12 +31,13 @@ def test_odometry_measures_known_move(world, h):
     rng = np.random.default_rng(int(h))
     for _ in range(3):
         odo = FrameOdometry(cam)
+        look = CameraLook(Appearance.random(rng), int(h))
         dn, de = rng.normal(0, 0.02 * h + 0.1, 2)
         att0 = np.radians([rng.normal(0, 5), rng.normal(0, 5), rng.uniform(0, 360)])
         att1 = att0 + np.radians(rng.normal(0, 2, 3))
         lon1, lat1, _ = GEOD.fwd(LON, LAT, math.degrees(math.atan2(de, dn)), math.hypot(dn, de))
-        odo.step(render(world, cam, LAT, LON, h, *att0, rng), 0.0, *att0, h)
-        m = odo.step(render(world, cam, lat1, lon1, h, *att1, rng), 0.25, *att1, h)
+        odo.step(look(render(world, cam, LAT, LON, h, *att0), 0.0), 0.0, *att0, h)
+        m = odo.step(look(render(world, cam, lat1, lon1, h, *att1), 0.25), 0.25, *att1, h)
         assert m is not None
         assert math.hypot(m.d_north - dn, m.d_east - de) < max(m.sigma, 0.01), (m, dn, de)
 
@@ -58,12 +60,11 @@ def test_sigma_grows_with_distance_on_odometry_alone(world):
             return None
 
     cam = CameraModel.from_hfov(960, 600, 90)
-    rng = np.random.default_rng(0)
     nav = Navigator(world, cam, NoFix(), LAT, LON, start_sigma_m=5.0, odometry_drift=0.05)
     step_m, steps = 2.5, 96  # 240 m at 10 m/s, 4 Hz
     for i in range(steps + 1):
         lon, lat, _ = GEOD.fwd(LON, LAT, 0.0, i * step_m - steps * step_m / 2)
-        nav.process(render(world, cam, lat, lon, 120.0, 0.0, 0.0, 0.0, rng), i * 0.25, 0.0, 0.0, 0.0, 120.0)
+        nav.process(render(world, cam, lat, lon, 120.0, 0.0, 0.0, 0.0), i * 0.25, 0.0, 0.0, 0.0, 120.0)
     assert nav.odometry_dist == pytest.approx(steps * step_m, rel=0.1)
     assert nav.state(steps * 0.25).sigma_m > 0.05 * steps * step_m * 0.9
 

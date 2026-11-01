@@ -74,14 +74,13 @@ class SitlCamera:
     errors instead.
     """
 
-    def __init__(self, autopilot, map_, cam, rate_hz: float = 5.0):
-        import numpy as np
-
+    def __init__(self, autopilot, map_, cam, rate_hz: float = 5.0, look=None):
+        from .appearance import CameraLook
         from .sim import warm_up
 
         warm_up()
         self.ap, self.map, self.cam, self.period = autopilot, map_, cam, 1 / rate_hz
-        self.rng = np.random.default_rng()
+        self.look = look or CameraLook()
         self._last = 0.0
 
     def latest(self, newer_than: float = 0.0, timeout: float = 1.0):
@@ -96,8 +95,7 @@ class SitlCamera:
             time.sleep(0.1)
             return None, 0.0
         t, s = st
-        frame = render(self.map, self.cam, s.lat / 1e7, s.lng / 1e7, max(h, 0.3), att.roll, att.pitch, att.yaw,
-                       self.rng)
+        frame = self.look(render(self.map, self.cam, s.lat / 1e7, s.lng / 1e7, max(h, 0.3), att.roll, att.pitch, att.yaw), t)
         self._last = time.monotonic()
         return frame, t
 

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import inspect
 import json
 import math
 import os
@@ -62,15 +61,16 @@ def route_poses(site: str, data: Path, n: int, seed: int, height: float | None =
 
 
 def frames(site: str, data: Path, n: int, seed: int, att_noise: float, yaw_noise: float, alt_noise: float,
-           same_year: bool = False, detail: float = 0.0, height: float | None = None):
+           same_year: bool = False, detail: float = 0.0, height: float | None = None, appearance: str = ""):
     """Yield (index, pose, ortho, heading error, rng, map) for n frames evenly spaced along the route.
 
     The navigator is given roll/pitch with att_noise, heading with yaw_noise
     (degrees, 1 sigma) and height with alt_noise (fraction), as `visnav sim` does.
     With same_year, frames are rendered from the map itself instead of the world.
-    detail is the contrast of render's procedural sub-NAIP ground texture, where
-    the installed visnav has it.
+    detail is the contrast of render's procedural sub-NAIP ground texture.
+    appearance is as for `visnav sim3d --appearance`; "random" draws one per site.
     """
+    from visnav.appearance import Appearance, CameraLook
     from visnav.geo import MapRaster
     from visnav.ortho import orthorectify
     from visnav.sim import render
@@ -78,10 +78,10 @@ def frames(site: str, data: Path, n: int, seed: int, att_noise: float, yaw_noise
     map_, cam, poses = route_poses(site, data, n, seed, height)
     world = map_ if same_year else MapRaster.load(data / site / "world.tif")
     key = zlib.crc32(site.encode())
-    kw = {"detail": detail} if "detail" in inspect.signature(render).parameters else {}
+    look = CameraLook(Appearance.parse(appearance, [seed, key]), [seed, key])
     for i, p in poses:
         rng = np.random.default_rng([seed, key, i])
-        img = render(world, cam, p.lat, p.lon, p.h, p.roll, p.pitch, p.yaw, rng, **kw)
+        img = look(render(world, cam, p.lat, p.lon, p.h, p.roll, p.pitch, p.yaw, detail=detail), p.t)
         yaw_err = rng.normal(0, yaw_noise)
         roll = p.roll + math.radians(rng.normal(0, att_noise))
         pitch = p.pitch + math.radians(rng.normal(0, att_noise))
@@ -105,7 +105,8 @@ def run_job(site: str, spec: str, data: Path, out: Path, args) -> str:
             torch.set_num_interop_threads(1)
     rows, matcher, setup_s = [], None, 0.0
     for i, p, ortho, yaw_err, rng, map_ in frames(site, data, args.frames, args.seed, args.att_noise,
-                                                    args.yaw_noise, args.alt_noise, args.same_year, args.detail, args.height):
+                                                    args.yaw_noise, args.alt_noise, args.same_year, args.detail, args.height,
+                                                    args.appearance):
         if matcher is None:
             t0 = time.perf_counter()
             matcher = matchers.make(spec, map_)
@@ -159,6 +160,7 @@ def main(argv=None):
     ap.add_argument("--detail", type=float, default=0.0,
                     help="contrast of visnav.sim.render's procedural ground texture (0: NAIP only)")
     ap.add_argument("--height", type=float, help="m AGL to fly at instead of the mission's height")
+    ap.add_argument("--appearance", default="", help='as for visnav sim3d; "random" draws one per site. Default: no change')
     ap.add_argument("--jobs", type=int, default=12, help="processes")
     ap.add_argument("--threads", type=int, default=1, help="threads per process")
     args = ap.parse_args(argv)
