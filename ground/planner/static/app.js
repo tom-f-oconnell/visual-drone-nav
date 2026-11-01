@@ -61,7 +61,7 @@ function renderList() {
   wps.forEach((wp, i) => {
     const li = document.createElement("li");
     li.innerHTML = `<div class="wp"><span>${wp.lat.toFixed(5)}, ${wp.lon.toFixed(5)}</span>
-      <input type="number" placeholder="alt" title="altitude m (blank = cruise)" value="${wp.alt ?? ""}">
+      <input type="number" placeholder="alt" title="Altitude of this waypoint in metres above the first waypoint. Blank uses the cruise altitude." value="${wp.alt ?? ""}">
       <button title="move up">↑</button><button title="delete">✕</button></div>`;
     const [alt, up, del] = li.querySelectorAll("input, button");
     alt.onchange = () => { wp.alt = alt.value === "" ? null : +alt.value; check(); };
@@ -81,7 +81,7 @@ async function api(path, opts = {}) {
   return r;
 }
 
-let checkTimer, routeCached = false;
+let checkTimer, routeCached = false, routeCells = "";
 function check() {
   clearTimeout(checkTimer);
   checkTimer = setTimeout(async () => {
@@ -95,21 +95,21 @@ function check() {
       (res.cells > res.cached ? `, about ${res.est_download_mb} MB to fetch.` : ".");
     $("warnings").innerHTML = res.warnings.map((w) => `<li>${w}</li>`).join("");
     routeCached = Boolean(res.cells && res.cached === res.cells);
+    routeCells = (res.cell_keys || []).join();
     $("export").disabled = !routeCached;
     updateSimButton();
     refreshImagery(res.cached);
   }, 250);
 }
 
-// Which NAIP years the route uses. The server may have to ask the imagery source, so only when this can change.
+// Which NAIP years the route uses. The server may have to ask the imagery source, so only when the route's cells change.
 let imageryKey = null;
 async function refreshImagery(cached) {
-  const m = mission();
-  const key = JSON.stringify([m.waypoints, m.corridor_m, cached]);
+  const key = `${routeCells}/${cached}`;
   if (key === imageryKey) return;
   imageryKey = key;
   try {
-    const { label } = await (await api("/api/plan/imagery", { method: "POST", body: JSON.stringify(m) })).json();
+    const { label } = await (await api("/api/plan/imagery", { method: "POST", body: JSON.stringify(mission()) })).json();
     if (key === imageryKey) $("naip_years").textContent = label;
   } catch (e) { imageryKey = null; console.warn(e); }
 }
@@ -120,18 +120,21 @@ $("cache").onclick = async () => {
     let job = await (await api("/api/cache/jobs", { method: "POST", body: JSON.stringify(mission()) })).json();
     $("progress").hidden = false;
     while (job.state === "running") {
+      const shown = job.done;
       $("bar").style.width = `${job.total ? (100 * job.done) / job.total : 100}%`;
-      $("ptext").textContent = `${job.done} / ${job.total} cells`;
+      $("ptext").textContent = `${job.done} / ${job.total} new cells`;
       await new Promise((r) => setTimeout(r, 1000));
       job = await (await api(`/api/cache/jobs/${job.id}`)).json();
-      naip.setUrl(`/api/tiles/{z}/{x}/{y}.png?v=${job.done}`);
+      if (job.done !== shown) naip.setUrl(`/api/tiles/{z}/{x}/{y}.png?v=${job.done}`);
     }
     $("bar").style.width = "100%";
-    naip.setUrl(`/api/tiles/{z}/{x}/{y}.png?v=${Date.now()}`);
+    if (job.total) naip.setUrl(`/api/tiles/{z}/{x}/{y}.png?v=${Date.now()}`);
     const notes = [];
     if (job.no_coverage.length) notes.push(`${job.no_coverage.length} cells have no NAIP coverage`);
     if (job.errors.length) notes.push(`${job.errors.length} errors (see server log)`);
-    $("ptext").textContent = notes.length ? notes.join("; ") : `Cached ${job.total} cells`;
+    const kept = job.route_cells - job.total;
+    $("ptext").textContent = notes.length ? notes.join("; ")
+      : job.total ? `Downloaded ${job.total} new, ${kept} already cached` : `All ${kept} cells already cached`;
     refreshCells();
     check();
   } catch (e) { alert(e.message); }
@@ -204,12 +207,11 @@ function updateSimButton() {
 // Other NAIP years over the route, looked up once it is cached so the list is ready before it is opened.
 let yearsKey = null;
 async function refreshYears() {
-  const m = mission();
-  const key = JSON.stringify([m.waypoints, m.corridor_m]);
+  const key = routeCells;
   if (key === yearsKey) return;
   yearsKey = key;
   try {
-    const { years } = await (await api("/api/sim/years", { method: "POST", body: JSON.stringify(m) })).json();
+    const { years } = await (await api("/api/sim/years", { method: "POST", body: JSON.stringify(mission()) })).json();
     if (key !== yearsKey) return;
     const sel = $("sim_world"), keep = sel.value;
     while (sel.options.length > 1) sel.remove(1);

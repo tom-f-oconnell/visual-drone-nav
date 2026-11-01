@@ -12,20 +12,20 @@
     <h1>NAIP flight planner</h1>
 
     <section>
-      <label>Mission <input id="name" value="mission1"></label>
+      <label title="Name of this plan, used when saving it and for the exported bundle. Letters, digits, - and _ only; anything else becomes _.">Mission <input id="name" value="mission1"></label>
       <div class="row">
-        <select id="saved"><option value="">Load saved…</option></select>
-        <button id="save">Save</button>
+        <select id="saved" title="Open a plan saved earlier with Save."><option value="">Load saved…</option></select>
+        <button id="save" title="Save the waypoints and settings under the mission name.">Save</button>
       </div>
     </section>
 
     <section class="grid">
-      <label>Cruise alt (m AGL) <input id="default_alt" type="number" value="120" min="5"></label>
-      <label>Takeoff alt (m) <input id="takeoff_alt" type="number" value="30" min="5"></label>
-      <label>Speed (m/s) <input id="speed" type="number" value="10" min="1" step="0.5"></label>
-      <label>Corridor half-width (m) <input id="corridor_m" type="number" value="400" min="50" step="50"></label>
-      <label>Camera HFOV (deg) <input id="hfov_deg" type="number" value="90" min="10" max="170"></label>
-      <label>End <select id="end_action">
+      <label title="Height above the first waypoint for every waypoint without its own altitude. Higher sees more ground, which makes map matching more reliable: with a 90 degree lens it only starts at about 60 m. The planner warns above 122 m (400 ft), the US Part 107 limit.">Cruise alt (m AGL) <input id="default_alt" type="number" value="120" min="5"></label>
+      <label title="Height to climb to straight above the first waypoint before flying the route, in metres. Below about 60 m (with a 90 degree lens) the vehicle navigates on visual odometry alone, not the map.">Takeoff alt (m) <input id="takeoff_alt" type="number" value="30" min="5"></label>
+      <label title="Cruise speed between waypoints. It sets the mission's speed and the time estimate. The built-in simulator flies at 10 m/s at most.">Speed (m/s) <input id="speed" type="number" value="10" min="1" step="0.5"></label>
+      <label title="How far the imagery extends on each side of the route, so the whole band is twice this wide. Every NAIP cell the band touches is downloaded, and imagery outside it is left out of the mission's map, so the vehicle cannot match against the map if it drifts further. Wider means more cells to download and a bigger bundle.">Corridor half-width (m) <input id="corridor_m" type="number" value="400" min="50" step="50"></label>
+      <label title="Horizontal field of view of the downward camera. With altitude it sets how wide a strip of ground each frame sees, which is shown below. Wide lenses, about 90 degrees, match the map best.">Camera HFOV (deg) <input id="hfov_deg" type="number" value="90" min="10" max="170"></label>
+      <label title="What happens after the last waypoint. Return to launch: fly back to the first waypoint and land. Land at last WP: land there. Loiter / nothing: no landing is planned, and the vehicle stays in the air at the last waypoint.">End <select id="end_action">
         <option value="rtl">Return to launch</option>
         <option value="land">Land at last WP</option>
         <option value="none">Loiter / nothing</option>
@@ -42,7 +42,7 @@
     <ul id="warnings"></ul>
 
     <section class="actions">
-      <button id="cache">Cache NAIP for route<small id="naip_years"></small></button>
+      <button id="cache" title="Download the NAIP cells the corridor touches, skipping any already on disk. A cell is 0.01 degrees square, about 1 km, and is kept for every mission that uses it.">Cache NAIP for route<small id="naip_years"></small></button>
       <div id="progress" class="progress" hidden><div id="bar" class="bar"></div><span id="ptext" class="ptext"></span></div>
       <button id="export" class="primary">Export mission bundle (.zip)</button>
       <button id="wpl" class="ghost">Download .waypoints only</button>
@@ -51,47 +51,47 @@
     <section id="simsec">
       <h2>Simulate <small>a GPS-denied flight of this route</small></h2>
       <div class="grid">
-        <label class="wide">Camera imagery <select id="sim_world">
+        <label title="NAIP imagery the simulated camera sees; the map the vehicle navigates by stays the same. The map's own imagery makes matching too easy. Another year adds real changes in buildings, crops and light, so it is the fairer test. Other years are listed once the route is cached, and download once." class="wide">Camera imagery <select id="sim_world">
           <option value="">Same imagery as the map (optimistic)</option>
         </select></label>
-        <label>Wind (m/s) <input id="sim_wind" type="number" value="3" min="0" max="30" step="0.5"></label>
-        <label>Wind from (deg) <input id="sim_wind_from" type="number" value="300" min="0" max="360" step="10"></label>
-        <label>Gusts (m/s) <input id="sim_gust" type="number" value="1.5" min="0" max="15" step="0.5"></label>
-        <label>Random seed <input id="sim_seed" type="number" value="0" min="0"></label>
-        <label class="wide">Pace <select id="sim_pace">
+        <label title="Steady wind speed during the simulated flight.">Wind (m/s) <input id="sim_wind" type="number" value="3" min="0" max="30" step="0.5"></label>
+        <label title="Compass direction the wind blows from: 0 is north, 90 east, 180 south, 270 west.">Wind from (deg) <input id="sim_wind_from" type="number" value="300" min="0" max="360" step="10"></label>
+        <label title="Strength of the random gusts on top of the steady wind (standard deviation).">Gusts (m/s) <input id="sim_gust" type="number" value="1.5" min="0" max="15" step="0.5"></label>
+        <label title="Picks the random gusts and sensor errors. The same seed repeats them; change it to fly another sample.">Random seed <input id="sim_seed" type="number" value="0" min="0"></label>
+        <label title="How fast the simulation runs. As fast as possible finishes soonest. Real time takes as long as the flight would. Either way you can pause it, change speed and replay it afterwards." class="wide">Pace <select id="sim_pace">
           <option value="0">As fast as possible</option>
           <option value="1">Real time</option>
         </select></label>
       </div>
       <div class="row" id="look_bar">
-        <span>Camera appearance <small id="look_state">as the imagery</small></span>
+        <span title="How the simulated camera's picture differs from the imagery, as a stand-in for lighting, season and sensor differences. By default it does not.">Camera appearance <small id="look_state">as the imagery</small></span>
         <button id="look_random" title="Realistic stand-in for differences in lighting, season and sensor">Randomize</button>
         <button id="look_reset" class="ghost" title="Show the imagery as it is">Reset</button>
       </div>
       <details id="look">
-        <summary>Adjust</summary>
+        <summary title="Show every value, to set them by hand.">Adjust</summary>
         <p class="hint">Held for the whole flight, as a stand-in for lighting, season and sensor differences from the NAIP flight.</p>
         <div class="grid">
-          <label>Gamma <input data-look="gamma" type="number" value="1" min="0.1" max="5" step="0.01"></label>
-          <label>Blur (px) <input data-look="blur" type="number" value="0" min="0" max="20" step="0.1"></label>
-          <label>Red gain <input data-look="red" type="number" value="1" min="0.1" max="5" step="0.01"></label>
-          <label>Green gain <input data-look="green" type="number" value="1" min="0.1" max="5" step="0.01"></label>
-          <label>Blue gain <input data-look="blue" type="number" value="1" min="0.1" max="5" step="0.01"></label>
-          <label>Noise (0 to 1) <input data-look="noise" type="number" value="0" min="0" max="0.5" step="0.001"></label>
+          <label title="Tone curve of the camera compared with the imagery. Above 1 darkens midtones, below 1 lightens them. 1 changes nothing.">Gamma <input data-look="gamma" type="number" value="1" min="0.1" max="5" step="0.01"></label>
+          <label title="Softness from the lens and vibration, as the sigma of a Gaussian blur in camera pixels. 0 changes nothing.">Blur (px) <input data-look="blur" type="number" value="0" min="0" max="20" step="0.1"></label>
+          <label title="Multiplies the red channel, for exposure and white balance. 1 changes nothing.">Red gain <input data-look="red" type="number" value="1" min="0.1" max="5" step="0.01"></label>
+          <label title="Multiplies the green channel, for exposure and white balance. 1 changes nothing.">Green gain <input data-look="green" type="number" value="1" min="0.1" max="5" step="0.01"></label>
+          <label title="Multiplies the blue channel, for exposure and white balance. 1 changes nothing.">Blue gain <input data-look="blue" type="number" value="1" min="0.1" max="5" step="0.01"></label>
+          <label title="Sensor noise as a fraction of full scale (standard deviation), so 0.01 is 1%. It is new in each frame, as on a real sensor. 0 changes nothing.">Noise (0 to 1) <input data-look="noise" type="number" value="0" min="0" max="0.5" step="0.001"></label>
         </div>
         <p class="hint">Slow wander during the flight, as a fraction (standard deviation), for clouds and the camera's auto exposure and white balance.</p>
         <div class="grid">
-          <label>Brightness <input data-look="brightness_drift" type="number" value="0" min="0" max="1" step="0.005"></label>
-          <label>Colour <input data-look="color_drift" type="number" value="0" min="0" max="1" step="0.005"></label>
-          <label>Gamma <input data-look="gamma_drift" type="number" value="0" min="0" max="1" step="0.005"></label>
-          <label>Time scale (s) <input data-look="drift_tau_s" type="number" value="120" min="1" max="86400" step="10"></label>
+          <label title="How far all channels together wander during the flight, as a fraction (standard deviation), so 0.05 is about 5%. Stands in for clouds, as far as auto exposure leaves them. 0 changes nothing.">Brightness <input data-look="brightness_drift" type="number" value="0" min="0" max="1" step="0.005"></label>
+          <label title="How far each channel wanders on its own during the flight, as a fraction (standard deviation). Stands in for the colour of the light, as far as white balance leaves it. 0 changes nothing.">Colour <input data-look="color_drift" type="number" value="0" min="0" max="1" step="0.005"></label>
+          <label title="How far gamma wanders during the flight, as a fraction (standard deviation). Stands in for haze and flat light. 0 changes nothing.">Gamma <input data-look="gamma_drift" type="number" value="0" min="0" max="1" step="0.005"></label>
+          <label title="How slowly the wander above changes: its correlation time in seconds. Longer is slower. It does nothing unless one of them is set.">Time scale (s) <input data-look="drift_tau_s" type="number" value="120" min="1" max="86400" step="10"></label>
         </div>
       </details>
       <button id="sim_run" class="primary" disabled>Run simulation</button>
       <div id="sim_progress" class="progress" hidden><div id="sim_bar" class="bar"></div><span id="sim_ptext" class="ptext"></span></div>
       <p id="sim_result"></p>
       <div class="row">
-        <select id="sim_runs"><option value="">Past simulations…</option></select>
+        <select id="sim_runs" title="Open an earlier simulation to replay it and see its result."><option value="">Past simulations…</option></select>
         <button id="sim_stop" hidden>Stop</button>
         <button id="sim_delete" class="ghost" hidden>Delete</button>
       </div>

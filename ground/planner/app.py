@@ -122,6 +122,7 @@ def check_plan(mission: Mission):
         "est_time_s": round(mission.length_m() / mission.speed),
         "footprint_m": round(mission.footprint_m(), 1),
         "cells": len(cells),
+        "cell_keys": [c.key for c in cells],
         "cached": cached,
         "est_download_mb": round((len(cells) - cached) * 1.1 * 0.85e6 / GSD**2 * 3 / 1e6 * 0.5, 1),
         "corridor": mapping(poly_ll),
@@ -211,9 +212,10 @@ def _run_job(job_id: str, cells: list[Cell]):
 def start_cache_job(mission: Mission):
     if not mission.waypoints:
         raise HTTPException(400, "no waypoints")
-    cells = [c for c in mission.required_cells() if not cache.has(c)]
+    route_cells = mission.required_cells()
+    cells = [c for c in route_cells if not cache.has(c)]
     job_id = uuid.uuid4().hex[:8]
-    _jobs[job_id] = {"id": job_id, "state": "running", "total": len(cells), "done": 0,
+    _jobs[job_id] = {"id": job_id, "state": "running", "route_cells": len(route_cells), "total": len(cells), "done": 0,
                      "errors": [], "no_coverage": [], "cancel": False}
     _pool.submit(_run_job, job_id, cells)
     return _jobs[job_id]

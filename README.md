@@ -22,8 +22,11 @@ pip install -e ../onboard --no-deps      # for the Simulate panel
 uvicorn planner.app:app --port 8347      # open http://localhost:8347
 ```
 
+Hover over any field for what it means.
+
 1. Click the map to add waypoints (drag to move, set per-waypoint altitude if needed).
-2. **Cache NAIP for route** downloads every 0.01 degree cell that the corridor touches.
+2. **Cache NAIP for route** downloads every 0.01 degree cell (about 1 km) that the
+   corridor touches: the band extending the corridor half-width to each side of the route.
    Reads are windowed range requests against the Planetary Computer COGs, so only
    the needed pixels are fetched. Cells are kept in `data/naip/` and reused across missions.
    The button names the NAIP year the route uses.
@@ -125,7 +128,9 @@ the NAIP map as the ground, the vehicle with its attitude, the true path, the
 autopilot's estimate, every vision fix, the camera footprint and frustum, the
 mission plan, the live camera frame and an error trace with the dead-reckoning
 stretches shaded. Orbit, chase and top views; drag to rotate, right-drag or
-shift-drag to pan, wheel or pinch to zoom, double-click to follow again.
+shift-drag to pan, wheel or pinch to zoom, double-click to follow again. During a
+live flight, pausing, scrubbing or picking a speed leaves the newest data until
+playback catches up with it again.
 `--export` writes one self-contained HTML file that replays the flight anywhere.
 
 By default camera frames are rendered from the same imagery the navigator

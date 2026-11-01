@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import time
+from html.parser import HTMLParser
 
 import pytest
 from fastapi.testclient import TestClient
@@ -166,6 +167,40 @@ def test_camera_appearance(client):
     assert run["state"] == "finished", run
     assert run["options"]["appearance"] == values
     assert run["summary"]["appearance"] == values
+
+
+def test_every_field_explains_itself_on_hover(client):
+    """Each input and select has a title of its own or from the label around it."""
+
+    class Fields(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.labels, self.missing, self.count = [], [], 0
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if tag == "label":
+                self.labels.append(attrs.get("title"))
+            elif tag in ("input", "select"):
+                self.count += 1
+                if not attrs.get("title") and not any(self.labels):
+                    self.missing.append(attrs.get("id") or attrs.get("data-look"))
+
+        def handle_endtag(self, tag):
+            if tag == "label":
+                self.labels.pop()
+
+    fields = Fields()
+    fields.feed(client.get("/").text)
+    assert fields.count > 20 and not fields.missing, fields.missing
+
+
+def test_cache_job_says_how_much_of_the_route_it_had_to_fetch(client):
+    m = mission()
+    cells = client.post("/api/plan/check", json=m).json()
+    assert cells["cached"] == cells["cells"] == len(cells["cell_keys"]) > 1
+    job = client.post("/api/cache/jobs", json=m).json()
+    assert job["total"] == 0 and job["route_cells"] == cells["cells"]
 
 
 def test_refusals(client):

@@ -268,7 +268,8 @@ function onNewRecord() {
 }
 
 // Records arrive in bursts, so play a steady second or so behind the newest one rather than jumping to each.
-let liveRate = 0;
+// Pausing, scrubbing or picking a speed leaves the newest record until playback catches up with it again.
+let liveRate = 0, atNewest = true;
 function advanceLive(dt) {
   liveRate += ((duration() - t) - liveRate) * (1 - Math.exp(-dt / 0.5));
   t = Math.min(t + liveRate * dt, duration());
@@ -410,11 +411,15 @@ cv.addEventListener("dblclick", () => { follow = true; });
 
 // ---------- Transport ----------
 let scrubbing = false;
-$("play").onclick = () => { playing = !playing; $("play").textContent = playing ? "Pause" : "Play"; if (playing && t >= duration()) t = 0; };
-$("scrub").addEventListener("input", () => { scrubbing = true; t = (duration() * $("scrub").value) / 1000; follow = true; });
+$("play").onclick = () => {
+  playing = !playing; atNewest = false;
+  $("play").textContent = playing ? "Pause" : "Play";
+  if (playing && !live && t >= duration()) t = 0;
+};
+$("scrub").addEventListener("input", () => { scrubbing = true; atNewest = false; t = (duration() * $("scrub").value) / 1000; follow = true; });
 $("scrub").addEventListener("change", () => { scrubbing = false; });
 document.querySelectorAll("#speed button").forEach((b) => (b.onclick = () => {
-  speed = +b.dataset.s; document.querySelectorAll("#speed button").forEach((o) => o.setAttribute("aria-pressed", String(o === b)));
+  speed = +b.dataset.s; atNewest = false; document.querySelectorAll("#speed button").forEach((o) => o.setAttribute("aria-pressed", String(o === b)));
 }));
 window.addEventListener("keydown", (e) => { if (e.code === "Space" && e.target === document.body) { e.preventDefault(); $("play").click(); } });
 
@@ -426,8 +431,10 @@ addEventListener("resize", resize);
 
 function loop(now) {
   const dt = Math.min((now - lastFrame) / 1000, 0.1); lastFrame = now;
-  if (live && follow) { if (!scrubbing) advanceLive(dt); }
-  else if (playing && !scrubbing) t = Math.min(t + dt * speed, duration());
+  if (playing && !scrubbing) {
+    if (live && atNewest) advanceLive(dt);
+    else { t = Math.min(t + dt * speed, duration()); atNewest = t >= duration(); }
+  }
   if (playing && t >= duration() && !live && records.length) { playing = false; $("play").textContent = "Replay"; }
   update(); placeCamera(dt);
   if (performance.now() - (drawSpark.at || 0) > 250) drawSpark();
