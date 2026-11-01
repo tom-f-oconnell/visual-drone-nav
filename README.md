@@ -129,8 +129,11 @@ visnav sim3d --bundle ~/missions/mission1 --port 0 --export flight.html --exit
 The viewer (three.js, served by the stdlib, no extra Python dependencies) shows
 the NAIP map as the ground, the vehicle with its attitude, the true path, the
 autopilot's estimate, every vision fix, the camera footprint and frustum, the
-mission plan, the live camera frame and an error trace with the dead-reckoning
-stretches shaded. Orbit, chase and top views; drag to rotate, right-drag or
+mission plan, the live camera frame, an error trace with the dead-reckoning
+stretches shaded, and the wind: an arrow on the vehicle and a dial for the wind now
+and the steady wind (the gap between them is the gust), plus a trace of wind speed
+over the flight. `visnav view` has no wind to show, nor do flights saved before it
+was recorded. Orbit, chase and top views; drag to rotate, right-drag or
 shift-drag to pan, wheel or pinch to zoom, double-click to follow again. During a
 live flight, pausing, scrubbing or picking a speed leaves the newest data until
 playback catches up with it again.

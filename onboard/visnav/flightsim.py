@@ -163,6 +163,8 @@ class FlightSim:
             "plan": [{"kind": k, "x": float(x), "y": float(y), "alt": float(a)} for k, x, y, a in self.plan],
             "name": self.meta["mission"]["name"],
             "navigation": "odometry" if self.odometry_only else "map",
+            # Without a navigator this only describes the map for `visnav view`, whose vehicle has wind of its own.
+            "wind": {"steady": [float(v) for v in self.cfg.wind], "gust_sigma": self.cfg.gust_sigma} if self.nav else None,
             "camera": {"hfov_deg": math.degrees(2 * math.atan(self.cam.width / 2 / self.cam.fx)),
                        "aspect": self.cam.height / self.cam.width},
             "gsd": self.map.gsd,
@@ -302,6 +304,7 @@ class FlightSim:
                     "vis": bool(st and st.last_fix_age < 1.5),
                     "fix": last_fix,
                     "leg": self.leg,
+                    "wind": [round(float(v), 2) for v in np.array(cfg.wind) + self.gust],
                 }
                 if thumb:
                     rec["img"] = thumb

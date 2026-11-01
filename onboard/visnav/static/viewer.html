@@ -8,7 +8,7 @@
 :root {
   color-scheme: dark;
   --bg: #0f1412; --panel: rgba(16, 22, 20, 0.86); --line: #2f3a36; --fg: #e4ebe7; --muted: #8fa09a;
-  --truth: #f2f2ee; --est: #3fc1d9; --fix: #f0a04b; --plan: #b7e07a; --ok: #6fd08c; --warn: #f0a04b; --bad: #ef6b5b;
+  --truth: #f2f2ee; --est: #3fc1d9; --fix: #f0a04b; --plan: #b7e07a; --wind: #c39bff; --ok: #6fd08c; --warn: #f0a04b; --bad: #ef6b5b;
   --sans: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
 }
 html, body { height: 100%; }
@@ -29,7 +29,18 @@ dt { color: var(--muted); } dd { margin: 0; text-align: right; font-family: var(
 #thumbwrap { display: grid; gap: 4px; }
 #thumb { width: 100%; aspect-ratio: 192 / 120; background: #000; border-radius: 3px; object-fit: cover; }
 #thumbwrap span { color: var(--muted); font: 10.5px var(--mono); }
-#legend { top: calc(12px + env(safe-area-inset-top, 0px)); right: max(12px, env(safe-area-inset-right, 0px)); padding: 10px 12px; display: grid; gap: 5px; font-size: 12px; }
+#right { position: fixed; top: calc(12px + env(safe-area-inset-top, 0px)); right: max(12px, env(safe-area-inset-right, 0px)); width: 236px; display: grid; gap: 8px; }
+#right .panel { position: static; }
+#legend { padding: 10px 12px; display: grid; gap: 5px; font-size: 12px; }
+#wind { padding: 10px 12px; display: grid; gap: 6px; }
+#wind h2 { margin: 0; font-size: 12px; font-weight: 600; }
+#wind .windrow { display: grid; grid-template-columns: 84px 1fr; gap: 10px; align-items: center; }
+#wind dl { gap: 2px 8px; font-size: 11.5px; }
+#wind dd { white-space: nowrap; font-size: 11.5px; }
+#windrose { width: 84px; height: 84px; display: block; }
+#windrose text { font: 500 11px var(--mono); fill: var(--muted); text-anchor: middle; dominant-baseline: central; }
+#windrose #card-n { fill: var(--fg); font-weight: 600; }
+#windspark { width: 100%; height: 30px; display: block; }
 #legend i { display: inline-block; width: 18px; height: 0; border-top: 3px solid; vertical-align: middle; margin-right: 8px; }
 #legend .views { display: flex; gap: 4px; margin-top: 6px; }
 button { font: 500 12px var(--sans); color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 5px 9px; cursor: pointer; }
@@ -46,7 +57,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--est); outli
   #status { width: auto; right: max(12px, env(safe-area-inset-right, 0px)); grid-template-columns: 1fr 1fr; }
   #status h1, #status .chip, #sparkbox { grid-column: 1 / -1; }
   #thumbwrap { display: none; }
-  #legend { display: none; }
+  #legend, #windspark, #windcap { display: none; }
+  #right { top: auto; bottom: calc(64px + env(safe-area-inset-bottom, 0px)); }
   #speed button:nth-child(n+3) { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
@@ -72,17 +84,43 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--est); outli
   <div id="thumbwrap"><img id="thumb" alt="Simulated downward camera frame"><span>downward camera</span></div>
 </section>
 
+<div id="right">
 <aside id="legend" class="panel">
   <div><i style="border-color: var(--truth)"></i>true path</div>
   <div><i style="border-color: var(--est)"></i>autopilot estimate</div>
   <div><i style="border-color: var(--fix); border-top-style: dotted"></i>vision fixes</div>
   <div><i style="border-color: var(--plan); border-top-style: dashed"></i>mission plan</div>
+  <div class="windkey" hidden><i style="border-color: var(--wind)"></i>wind now</div>
+  <div class="windkey" hidden><i style="border-color: var(--wind); opacity: .5; border-top-width: 2px"></i>steady wind</div>
   <div class="views" role="group" aria-label="Camera view">
     <button id="v-orbit" aria-pressed="true">Orbit</button>
     <button id="v-chase" aria-pressed="false">Chase</button>
     <button id="v-top" aria-pressed="false">Top</button>
   </div>
 </aside>
+<section id="wind" class="panel" hidden title="The wind the vehicle is flying in. Arrows point where the wind is blowing toward, here and on the vehicle: the bright one is the wind now, gusts included, the faint one the steady wind, and the gap between them is the gust. The dial turns with the view, so its arrows match the scene. From is the compass direction the wind comes from.">
+  <h2>Wind</h2>
+  <div class="windrow">
+    <svg id="windrose" viewBox="-50 -50 100 100" aria-hidden="true">
+      <circle r="47" fill="none" stroke="var(--line)"/>
+      <g id="windticks" stroke="var(--muted)"><path d="M0-47V-43M47 0H43M0 47V43M-47 0H-43"/></g>
+      <text id="card-n">N</text><text id="card-e">E</text><text id="card-s">S</text><text id="card-w">W</text>
+      <g id="arrow-steady" fill="var(--wind)" stroke="var(--wind)" opacity=".5"><line stroke-width="1.5" stroke-linecap="round"/><path stroke="none"/></g>
+      <g id="arrow-now" fill="var(--wind)" stroke="var(--wind)"><line stroke-width="2.5" stroke-linecap="round"/><path stroke="none"/></g>
+    </svg>
+    <dl>
+      <dt>Now</dt><dd id="w-now">–</dd>
+      <dt>Steady</dt><dd id="w-steady">–</dd>
+      <dt>Gust</dt><dd id="w-gust">–</dd>
+      <dt>From</dt><dd id="w-from">–</dd>
+    </dl>
+  </div>
+  <div>
+    <canvas id="windspark"></canvas>
+    <div class="sparkcap" id="windcap"><span>wind speed, m/s</span><span id="windmax"></span></div>
+  </div>
+</section>
+</div>
 
 <div id="transport" class="panel">
   <button id="play">Pause</button>
@@ -138,6 +176,7 @@ const sun = new THREE.DirectionalLight(0xffffff, 0.6); sun.position.set(300, 800
 // ENU metres -> three: x = east, y = up, z = -north
 const V = (e, n, u) => new THREE.Vector3(e, u, -n);
 let drone, truthLine, estLine, fixPts, footprint, frustum, dropLine, S;
+let windArrows = null, windScale = 5, windNow = null;
 const MAXP = 20000;
 
 function lineGeom(n) {
@@ -194,6 +233,14 @@ function build(info, mapUrl) {
   dropLine.geometry.setDrawRange(0, 2);
   [footprint, frustum, dropLine].forEach((o) => { o.frustumCulled = false; world.add(o); });
 
+  if (info.wind) {
+    $("wind").hidden = false;
+    document.querySelectorAll(".windkey").forEach((el) => { el.hidden = false; });
+    windScale = Math.max(Math.hypot(...info.wind.steady) + 2 * info.wind.gust_sigma, 5);
+    $("w-steady").textContent = `${Math.hypot(...info.wind.steady).toFixed(1)} m/s`;
+    windArrows = { steady: makeWindArrow(0.5), now: makeWindArrow(1) };
+  }
+
   drone = makeDrone(); world.add(drone);
   // Fixed-size dot so the vehicle stays visible when zoomed out.
   const dot = new THREE.Points(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3()]),
@@ -221,6 +268,91 @@ function makeDrone() {
     rotor.position.set(sx * 0.35 * k, 0.05 * k, sz * 0.35 * k); g.add(rotor);
   });
   return g;
+}
+
+function makeWindArrow(opacity) {
+  const mat = new THREE.MeshBasicMaterial({ color: css("--wind"), transparent: true, opacity, depthTest: false, fog: false });
+  const arrow = new THREE.Group();
+  arrow.shaft = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 12), mat);
+  arrow.head = new THREE.Mesh(new THREE.ConeGeometry(1, 1, 18), mat);
+  arrow.shaft.renderOrder = arrow.head.renderOrder = 9;
+  arrow.add(arrow.shaft, arrow.head);
+  world.add(arrow);
+  return arrow;
+}
+
+// ---------- Wind: an arrow on the vehicle and a dial, both to one scale for the flight ----------
+const UP = new THREE.Vector3(0, 1, 0), viewDir = new THREE.Vector3();
+const POINTS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+const compass = (e, n) => (Math.atan2(e, n) * 180 / Math.PI + 360) % 360;
+
+function placeWindArrow(arrow, [e, n], metresPerScale, radius) {
+  const speed = Math.hypot(e, n), len = (speed / windScale) * metresPerScale;
+  arrow.visible = speed > 0.02;
+  if (!arrow.visible) return;
+  arrow.position.copy(drone.position);
+  arrow.position.y += metresPerScale * 0.2;
+  arrow.quaternion.setFromUnitVectors(UP, viewDir.set(e, 0, -n).normalize());
+  const head = Math.min(radius * 7, len * 0.5);
+  arrow.shaft.scale.set(radius, len - head, radius);
+  arrow.shaft.position.y = (len - head) / 2;
+  arrow.head.scale.set(radius * 3, head, radius * 3);
+  arrow.head.position.y = len - head / 2;
+}
+
+function setDialArrow(id, [e, n], turn) {
+  const g = $(id), speed = Math.hypot(e, n), len = Math.min(speed / windScale, 1) * 42;
+  g.setAttribute("visibility", speed > 0.02 ? "visible" : "hidden");
+  g.setAttribute("transform", `rotate(${(compass(e, n) - turn).toFixed(1)})`);
+  const line = g.querySelector("line"), head = Math.min(9, len * 0.6);
+  line.setAttribute("y2", (-(len - head * 0.7)).toFixed(1));
+  g.querySelector("path").setAttribute("d", `M0 ${-len}L${head * 0.55} ${head - len}H${-head * 0.55}Z`);
+}
+
+function drawWind() {
+  if (!windArrows || !windNow) return;
+  const steady = S.wind.steady, speed = Math.hypot(...windNow), gust = Math.hypot(windNow[0] - steady[0], windNow[1] - steady[1]);
+  // Keeps its size on screen at any zoom: the longest arrow the flight can have is a fixed share of the view.
+  const reach = camera.position.distanceTo(drone.position) * 0.16;
+  placeWindArrow(windArrows.steady, steady, reach, reach * 0.008);
+  placeWindArrow(windArrows.now, windNow, reach, reach * 0.016);
+  // The dial turns with the view, so "up" on it is the way the camera faces.
+  camera.getWorldDirection(viewDir);
+  const turn = compass(viewDir.x, -viewDir.z);
+  [["card-n", 0], ["card-e", 90], ["card-s", 180], ["card-w", 270]].forEach(([id, bearing]) => {
+    const a = (bearing - turn) * Math.PI / 180, el = $(id);
+    el.setAttribute("x", (36 * Math.sin(a)).toFixed(1));
+    el.setAttribute("y", (-36 * Math.cos(a)).toFixed(1));
+  });
+  $("windticks").setAttribute("transform", `rotate(${(-turn).toFixed(1)})`);
+  setDialArrow("arrow-steady", steady, turn);
+  setDialArrow("arrow-now", windNow, turn);
+  $("w-now").textContent = `${speed.toFixed(1)} m/s`;
+  $("w-gust").textContent = `${gust.toFixed(1)} m/s`;
+  if (speed > 0.02) {  // from: the opposite of where it blows
+    const from = compass(-windNow[0], -windNow[1]);
+    $("w-from").textContent = `${from.toFixed(0).padStart(3, "0")}° ${POINTS[Math.round(from / 22.5) % 16]}`;
+  } else $("w-from").textContent = "calm";
+}
+
+function drawWindSpark() {
+  const cv = $("windspark"), dpr = Math.min(devicePixelRatio, 2);
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !S || !S.wind) return;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
+  const rec = records.filter((r) => r.wind);
+  if (rec.length < 2) return;
+  const T = duration(), speeds = rec.map((r) => Math.hypot(...r.wind)), top = Math.max(1, ...speeds) * 1.05;
+  const Y = (v) => h - 1 - (v / top) * (h - 2);
+  $("windmax").textContent = `max ${Math.max(...speeds).toFixed(1)}`;
+  g.strokeStyle = css("--muted"); g.lineWidth = 1; g.globalAlpha = 0.6;
+  const y = Math.round(Y(Math.hypot(...S.wind.steady))) + 0.5;
+  g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); g.globalAlpha = 1;
+  g.beginPath();
+  rec.forEach((r, k) => { const x = (r.t / T) * w; k ? g.lineTo(x, Y(speeds[k])) : g.moveTo(x, Y(speeds[k])); });
+  g.strokeStyle = css("--wind"); g.lineWidth = 1.5; g.lineJoin = "round"; g.stroke();
+  g.fillStyle = css("--fg"); g.fillRect((sparkCursor / T) * w - 0.5, 0, 1, h);
 }
 
 // ---------- Footprint geometry (same camera model as visnav.ortho) ----------
@@ -286,6 +418,7 @@ function update() {
   const f = nx.t > r.t ? Math.min(Math.max((t - r.t) / (nx.t - r.t), 0), 1) : 0;
   const lerp = (a, b) => a + (b - a) * f;
   const p = [0, 1, 2].map((k) => lerp(r.p[k], nx.p[k]));
+  windNow = r.wind && nx.wind ? [lerp(r.wind[0], nx.wind[0]), lerp(r.wind[1], nx.wind[1])] : null;
   heading = r.att[2] + wrapPi(nx.att[2] - r.att[2]) * f;
   const att = [lerp(r.att[0], nx.att[0]), lerp(r.att[1], nx.att[1]), heading];
   drone.position.copy(V(p[0], p[1], p[2] + 1));
@@ -345,6 +478,7 @@ function drawSpark() {
   g.globalAlpha = 1;
   const cx = (sparkCursor / T) * w;
   g.fillStyle = css("--fg"); g.fillRect(cx - 0.5, 0, 1, h);
+  drawWindSpark();
   drawSpark.at = performance.now();
 }
 
@@ -437,7 +571,7 @@ function loop(now) {
     else { t = Math.min(t + dt * speed, duration()); atNewest = t >= duration(); }
   }
   if (playing && t >= duration() && !live && records.length) { playing = false; $("play").textContent = "Replay"; }
-  update(); placeCamera(dt);
+  update(); placeCamera(dt); drawWind();
   if (performance.now() - (drawSpark.at || 0) > 250) drawSpark();
   renderer.render(world, camera);
   requestAnimationFrame(loop);

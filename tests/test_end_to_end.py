@@ -13,6 +13,7 @@ import os
 import time
 import zipfile
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -139,6 +140,13 @@ def test_closed_loop_flight_sim(client, tmp_path):
     sim = FlightSim(map_, cam, nav, meta, SimConfig(camera_hz=2.0, seed=5, att_noise_deg=0.5, appearance=Appearance.parse("random", 5)))
     records, summary = sim.run()
     assert summary["landed"], summary
+    # The viewer draws the wind from these: steady in the scene, with gusts in every record.
+    steady = np.array(sim.scene()["wind"]["steady"])
+    wind = np.array([r["wind"] for r in records])
+    assert steady.tolist() == list(sim.cfg.wind) and sim.scene()["wind"]["gust_sigma"] == sim.cfg.gust_sigma
+    assert np.abs(wind.mean(axis=0) - steady).max() < sim.cfg.gust_sigma
+    assert wind.std(axis=0).min() > 0.2
+    assert FlightSim(map_, cam, None, meta).scene()["wind"] is None  # following a real vehicle, wind is unknown
     assert summary["fix_rate"] > 0.7, summary
     assert summary["ekf_err_median_m"] < 3.0, summary
     # Below map-matching height only odometry runs: takeoff and landing.
@@ -151,3 +159,4 @@ def test_closed_loop_flight_sim(client, tmp_path):
     out = export_html(tmp_path / "flight.html", sim.scene(), records, map_texture(map_, 1024), summary)
     html = out.read_text()
     assert "window.NAVSIM" in html and "three.min.js" in html and "__THREE_SRC__" not in html
+    assert 'id="windrose"' in html and '"wind":[' in html and '"steady":[' in html
