@@ -37,6 +37,9 @@ Hover over any field for what it means.
    The camera shows the imagery as it is, unless you press **Randomize** next to
    *Camera appearance* or set values under *Adjust*: gamma, colour gains, blur and
    noise for the whole flight, and how far they wander during it.
+   **Compare with and without map matching** flies the route twice with the same
+   settings, the second time on visual odometry alone from the first waypoint's
+   coordinates, and shows the two side by side under the *Comparison* tab.
 4. **Export mission bundle** gives a zip with `mission.waypoints` (QGC WPL 110),
    `mission.json` and `map.tif` (UTM, RGB, 0.6 m).
 
@@ -163,6 +166,20 @@ visnav sim3d --bundle ~/missions/mission1 --appearance brightness_drift=0.05,col
 | `gamma_drift` | 0 | 0 to 0.05 | slow wander of gamma (same) |
 | `drift_tau_s` | 120 | 30 to 300 | seconds the wander takes (correlation time) |
 
+To see what the saved imagery is worth, fly the same mission without it.
+`--matcher none` runs on visual odometry alone from the mission's first waypoint
+and never looks at the map's pixels. `compare` flies each seed both ways and prints
+the difference. Odometry alone looks too good unless it has a lasting error to
+accumulate, so set `--compass-bias` (degrees) or `--height-bias` (percent):
+
+```bash
+visnav sim3d   --bundle ~/missions/mission1 --matcher none
+visnav compare --bundle ~/missions/mission1 --world OTHER_YEAR/map.tif --seeds 3 --compass-bias 2
+```
+
+`--matcher none` is for the simulators; `visnav run` refuses it, as nothing would
+correct the drift on a real vehicle.
+
 To watch ArduPilot SITL (or a real vehicle) instead of the built-in model:
 
 ```bash
@@ -228,6 +245,8 @@ pytest tests
   controller over UDP, and checks the 3D viewer can follow it.
 * `test_matcher.py` covers the correlation matcher, matcher chains and the
   re-lock rule.
+* `test_compare.py` checks odometry alone never uses the map's pixels, and that a
+  lasting compass error hurts it but not map matching.
 * `test_appearance.py` checks simulated frames are untouched by default, that
   offsets hold from frame to frame and drift stays slow, and that a look changes
   nothing else in a flight.

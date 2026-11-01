@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Odometry only against map matching</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #7a7974; --grid: #e7e6e2; --line: #ddddd6;
+  --with-map: #2a78d6; --alone: #eb6834; --plan: #8f8e88; --accent: #1f6feb;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--surface); color: var(--ink); font: 14px/1.45 system-ui, sans-serif; }
+main { max-width: 1040px; margin: 0 auto; padding: 56px 24px 32px; }
+h1 { font-size: 18px; margin: 0 0 4px; }
+h2 { font-size: 14px; margin: 0 0 2px; }
+#conditions { color: var(--ink2); font-size: 12px; margin: 0 0 14px; }
+#headline { font-size: 15px; margin: 0 0 16px; min-height: 22px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; margin-bottom: 8px; }
+th, td { padding: 5px 10px; border-bottom: 1px solid var(--grid); text-align: right; font-weight: normal; }
+th:first-child, td:first-child { text-align: left; color: var(--ink2); }
+thead th { font-weight: 600; vertical-align: bottom; }
+thead .state { display: block; font-weight: normal; font-size: 12px; color: var(--ink2); }
+thead button { font: inherit; font-size: 12px; font-weight: normal; padding: 0; border: 0; background: none; color: var(--accent); cursor: pointer; }
+.key { display: inline-block; width: 16px; height: 0; border-top: 2px solid; vertical-align: middle; margin-right: 6px; border-radius: 1px; }
+.key.dash { border-top-style: dashed; }
+.charts { display: grid; grid-template-columns: 1fr; gap: 22px; margin-top: 18px; }
+.chart { position: relative; }
+.caption { color: var(--ink2); font-size: 12px; margin: 0 0 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; color: var(--ink2); margin: 0 0 4px; }
+svg { display: block; width: 100%; overflow: visible; touch-action: none; }
+svg text { font: 11px system-ui, sans-serif; fill: var(--muted); }
+svg text.end { fill: var(--ink2); font-size: 12px; }
+#tip { position: absolute; pointer-events: none; background: #fff; border: 1px solid var(--line); border-radius: 4px; box-shadow: 0 2px 8px rgba(0, 0, 0, .12); padding: 5px 8px; font-size: 12px; white-space: nowrap; z-index: 2; }
+#tip div { color: var(--ink2); }
+#tip b { color: var(--ink); font-variant-numeric: tabular-nums; }
+#notes { color: var(--ink2); font-size: 12px; margin: 18px 0 0; padding-left: 18px; }
+#notes li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Visual odometry only against odometry and map matching</h1>
+  <p id="conditions"></p>
+  <p id="headline" aria-live="polite"></p>
+  <table>
+    <thead><tr><th></th><th id="head0"></th><th id="head1"></th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="charts">
+    <section class="chart" id="errbox">
+      <h2>Position error as the flight goes on</h2>
+      <p class="caption">How far the true position is from where the autopilot believes it is.</p>
+      <div class="legend" id="errlegend"></div>
+      <svg id="errchart" role="img" aria-label="Position error against distance flown for both flights. The table above has the values."></svg>
+    </section>
+    <section class="chart" id="pathbox">
+      <h2>Where each flight really went</h2>
+      <p class="caption">True paths seen from above, north up, to the same scale both ways. Each vehicle steers toward where it believes the next waypoint is, so wind bends both paths.</p>
+      <div class="legend" id="pathlegend"></div>
+      <svg id="pathchart" role="img" aria-label="True flight paths of both flights over the planned route."></svg>
+    </section>
+  </div>
+  <ul id="notes"></ul>
+</main>
+<div id="tip" hidden></div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+const SERIES = {
+  map: { label: "With map matching", color: "var(--with-map)" },
+  odometry: { label: "Odometry only", color: "var(--alone)" },
+};
+const NS = "http://www.w3.org/2000/svg";
+const ACTIVE = ["preparing", "fetching", "running"];
+let data = null, runs = [], hover = null;
+
+function el(parent, name, attrs = {}, text) {
+  const node = document.createElementNS(NS, name);
+  Object.entries(attrs).forEach(([k, v]) => node.setAttribute(k, v));
+  if (text !== undefined) node.textContent = text;
+  parent.appendChild(node);
+  return node;
+}
+
+function niceStep(span, count) {
+  const raw = Math.max(span, 1e-6) / count, mag = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 5, 10].map((m) => m * mag).find((s) => s >= raw);
+}
+
+const metres = (v) => `${v >= 100 ? Math.round(v) : +v.toFixed(1)} m`;
+const pathOf = (xs, ys) => xs.map((x, i) => `${i ? "L" : "M"}${x.toFixed(1)} ${ys[i].toFixed(1)}`).join("");
+const flown = (run) => (run.series ? run.series.km : []);
+const nearest = (values, v) => {
+  let lo = 0, hi = values.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (values[m] < v) lo = m + 1; else hi = m; }
+  return lo > 0 && v - values[lo - 1] < values[lo] - v ? lo - 1 : lo;
+};
+
+function legend(box, withPlan) {
+  box.replaceChildren();
+  const add = (label, color, dash) => {
+    const item = document.createElement("span"), key = document.createElement("span");
+    key.className = dash ? "key dash" : "key";
+    key.style.borderTopColor = color;
+    item.append(key, label);
+    box.append(item);
+  };
+  runs.forEach((run) => add(SERIES[run.options.navigation || "map"].label, SERIES[run.options.navigation || "map"].color));
+  if (withPlan) add("Planned route", "var(--plan)", true);
+}
+
+function drawError() {
+  const svg = $("errchart"), width = svg.clientWidth || 800, height = 250, m = { l: 44, r: 118, t: 8, b: 34 };
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("height", height);
+  svg.replaceChildren();
+  const maxKm = Math.max(0.001, ...runs.flatMap(flown)), maxErr = Math.max(1, ...runs.flatMap((r) => (r.series ? r.series.err : [])));
+  const yStep = niceStep(maxErr, 4), yTop = Math.ceil(maxErr / yStep) * yStep, xStep = niceStep(maxKm, 6);
+  const X = (km) => m.l + (km / maxKm) * (width - m.l - m.r), Y = (e) => height - m.b - (e / yTop) * (height - m.t - m.b);
+  for (let v = 0; v <= yTop + 1e-9; v += yStep) {
+    el(svg, "line", { x1: m.l, x2: width - m.r, y1: Y(v), y2: Y(v), stroke: "var(--grid)", "stroke-width": 1 });
+    el(svg, "text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end" }, String(+v.toFixed(3)));
+  }
+  el(svg, "text", { x: 0, y: m.t + 4 }, "m");
+  for (let v = 0; v <= maxKm + 1e-9; v += xStep) el(svg, "text", { x: X(v), y: height - m.b + 16, "text-anchor": "middle" }, String(+v.toFixed(3)));
+  el(svg, "text", { x: width - m.r, y: height - 4, "text-anchor": "end" }, "distance flown, km");
+  const ends = [];
+  runs.forEach((run) => {
+    if (!run.series) return;
+    const color = SERIES[run.options.navigation || "map"].color, s = run.series;
+    el(svg, "path", { d: pathOf(s.km.map(X), s.err.map(Y)), fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" });
+    const last = s.km.length - 1;
+    ends.push({ x: X(s.km[last]), y: Y(s.err[last]), color, value: s.err[last], label: SERIES[run.options.navigation || "map"].label });
+  });
+  ends.forEach((end) => el(svg, "circle", { cx: end.x, cy: end.y, r: 4, fill: end.color, stroke: "var(--surface)", "stroke-width": 2 }));
+  // Direct labels only where they do not collide; the legend always names the lines.
+  if (ends.length < 2 || Math.abs(ends[0].y - ends[1].y) >= 16) {
+    ends.forEach((end) => el(svg, "text", { class: "end", x: end.x + 9, y: end.y + 4 }, metres(end.value)));
+  }
+  svg.X = X; svg.Y = Y; svg.maxKm = maxKm; svg.margin = m; svg.plotWidth = width - m.l - m.r;
+  el(svg, "g", { id: "errhover" });
+}
+
+function drawPaths() {
+  const svg = $("pathchart"), width = svg.clientWidth || 800, m = 12;
+  const xs = [...data.plan.map((p) => p[0]), ...runs.flatMap((r) => (r.series ? r.series.x : []))];
+  const ys = [...data.plan.map((p) => p[1]), ...runs.flatMap((r) => (r.series ? r.series.y : []))];
+  svg.replaceChildren();
+  if (!xs.length) { svg.setAttribute("height", 0); return; }
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const scale = Math.min((width - 2 * m) / Math.max(x1 - x0, 1), 420 / Math.max(y1 - y0, 1));
+  const height = Math.max((y1 - y0) * scale + 2 * m + 22, 90);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("height", height);
+  const X = (x) => (width - (x1 - x0) * scale) / 2 + (x - x0) * scale, Y = (y) => m + (y1 - y) * scale;
+  el(svg, "path", { d: pathOf(data.plan.map((p) => X(p[0])), data.plan.map((p) => Y(p[1]))), fill: "none", stroke: "var(--plan)", "stroke-width": 1.5, "stroke-dasharray": "5 5" });
+  runs.forEach((run) => {
+    if (!run.series) return;
+    el(svg, "path", { d: pathOf(run.series.x.map(X), run.series.y.map(Y)), fill: "none", stroke: SERIES[run.options.navigation || "map"].color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" });
+  });
+  // Scale bar, since the axes carry no ticks here.
+  const barM = niceStep((x1 - x0 || 100) / 4, 1), by = height - 8;
+  el(svg, "line", { x1: m, x2: m + barM * scale, y1: by, y2: by, stroke: "var(--muted)", "stroke-width": 1 });
+  el(svg, "text", { x: m + barM * scale + 6, y: by + 4 }, barM >= 1000 ? `${barM / 1000} km` : `${barM} m`);
+  svg.X = X; svg.Y = Y;
+  el(svg, "g", { id: "pathhover" });
+}
+
+function showHover(km, pageX, pageY) {
+  hover = km;
+  const err = $("errchart"), path = $("pathchart"), tip = $("tip");
+  const eg = err.querySelector("#errhover"), pg = path.querySelector("#pathhover");
+  if (!eg) return;
+  eg.replaceChildren();
+  if (pg) pg.replaceChildren();
+  tip.replaceChildren();
+  const head = document.createElement("div");
+  head.textContent = `${km.toFixed(2)} km flown`;
+  tip.append(head);
+  el(eg, "line", { x1: err.X(km), x2: err.X(km), y1: err.margin.t, y2: err.getBoundingClientRect().height - err.margin.b, stroke: "var(--muted)", "stroke-width": 1 });
+  runs.forEach((run) => {
+    if (!run.series) return;
+    const s = run.series, i = nearest(s.km, km), info = SERIES[run.options.navigation || "map"];
+    el(eg, "circle", { cx: err.X(s.km[i]), cy: err.Y(s.err[i]), r: 4, fill: info.color, stroke: "var(--surface)", "stroke-width": 2 });
+    if (pg) el(pg, "circle", { cx: path.X(s.x[i]), cy: path.Y(s.y[i]), r: 5, fill: info.color, stroke: "var(--surface)", "stroke-width": 2 });
+    const row = document.createElement("div"), key = document.createElement("span"), value = document.createElement("b");
+    key.className = "key";
+    key.style.borderTopColor = info.color;
+    value.textContent = metres(s.err[i]);
+    row.append(key, value, ` ${info.label.toLowerCase()}`);
+    tip.append(row);
+  });
+  tip.hidden = false;
+  const left = Math.min(pageX + 14, document.documentElement.clientWidth - tip.offsetWidth - 8);
+  tip.style.left = `${left}px`;
+  tip.style.top = `${pageY - tip.offsetHeight - 10}px`;
+}
+
+function hideHover() {
+  hover = null;
+  $("tip").hidden = true;
+  ["errhover", "pathhover"].forEach((id) => { const g = document.getElementById(id); if (g) g.replaceChildren(); });
+}
+
+$("errchart").addEventListener("pointermove", (e) => {
+  const svg = e.currentTarget, box = svg.getBoundingClientRect();
+  if (!svg.X) return;
+  const frac = Math.min(1, Math.max(0, (e.clientX - box.left - svg.margin.l) / svg.plotWidth));
+  showHover(frac * svg.maxKm, e.pageX, e.pageY);
+});
+$("pathchart").addEventListener("pointermove", (e) => {
+  const svg = e.currentTarget, box = svg.getBoundingClientRect();
+  if (!svg.X) return;
+  const px = e.clientX - box.left, py = e.clientY - box.top;
+  let best = null, bestD = Infinity;
+  runs.forEach((run) => {
+    if (!run.series) return;
+    run.series.x.forEach((x, i) => {
+      const d = Math.hypot(svg.X(x) - px, svg.Y(run.series.y[i]) - py);
+      if (d < bestD) { bestD = d; best = run.series.km[i]; }
+    });
+  });
+  if (best !== null && bestD < 40) showHover(best, e.pageX, e.pageY); else hideHover();
+});
+["errchart", "pathchart"].forEach((id) => $(id).addEventListener("pointerleave", hideHover));
+
+const ROWS = [
+  ["Position error, median", (s) => metres(s.ekf_err_median_m)],
+  ["Position error, 95% of the time under", (s) => metres(s.ekf_err_p95_m)],
+  ["Position error, largest", (s) => metres(s.ekf_err_max_m)],
+  ["Position error at the end", (s) => metres(s.ekf_err_final_m)],
+  ["  as a share of distance flown", (s) => `${s.final_err_pct_of_distance}%`],
+  ["Off target at the end", (s) => metres(s.landing_error_m)],
+  ["Distance flown", (s) => `${(s.distance_m / 1000).toFixed(2)} km`],
+  ["Map fixes", (s) => (s.navigation === "odometry" ? "none" : `${Math.round(100 * s.fix_rate)}% of frames`)],
+  ["Navigator time per frame", (s) => `${s.nav_ms_per_frame} ms`],
+  ["Needs saved imagery", (s) => (s.navigation === "odometry" ? "no" : "yes")],
+];
+
+function stateText(run) {
+  if (run.state === "finished") return run.summary.landed ? "landed" : run.summary.mission_complete ? "reached the last waypoint" : "ran out of time";
+  if (run.state === "running" && run.series) return `flying, ${run.series.km.at(-1).toFixed(2)} km so far`;
+  return { preparing: "building the map", fetching: "downloading NAIP", running: "starting", stopped: "stopped", failed: "failed" }[run.state] || run.state;
+}
+
+function drawTable() {
+  runs.forEach((run, k) => {
+    const head = $(`head${k}`), info = SERIES[run.options.navigation || "map"];
+    head.replaceChildren();
+    const key = document.createElement("span"), state = document.createElement("span"), open = document.createElement("button");
+    key.className = "key";
+    key.style.borderTopColor = info.color;
+    state.className = "state";
+    state.textContent = run.state === "failed" ? `failed: ${run.error}` : stateText(run);
+    open.textContent = "Watch in 3D";
+    open.title = "Open this flight in the 3D viewer";
+    open.hidden = !run.viewable;
+    open.onclick = () => { if (window.parent !== window && window.parent.followRun) window.parent.followRun(run.id); else location.href = `/sim/${run.id}/`; };
+    head.append(key, info.label, state, open);
+  });
+  const rows = $("rows");
+  rows.replaceChildren();
+  ROWS.forEach(([label, value]) => {
+    const tr = document.createElement("tr"), th = document.createElement("td");
+    th.textContent = label;
+    th.style.whiteSpace = "pre";
+    tr.append(th);
+    runs.forEach((run) => {
+      const td = document.createElement("td");
+      td.textContent = run.summary ? value(run.summary) : "–";
+      tr.append(td);
+    });
+    rows.append(tr);
+  });
+}
+
+function drawText() {
+  const o = runs[0].options;
+  const wind = `wind ${o.wind_speed} m/s from ${o.wind_from_deg}°, gusts ${o.gust} m/s, seed ${o.seed}`;
+  const camera = o.world_year ? `camera sees NAIP ${o.world_year}` : "camera sees the map's own imagery";
+  const look = Object.keys(o.appearance || {}).length ? ", camera appearance changed" : "";
+  $("conditions").textContent = `Same route and settings for both: ${camera}${look}, ${wind}, compass bias ${o.compass_bias_deg ?? 0}°, height bias ${o.height_bias_pct ?? 0}%.`;
+
+  const map = runs.find((r) => (r.options.navigation || "map") === "map"), alone = runs.find((r) => r.options.navigation === "odometry");
+  $("headline").textContent = map && alone && map.summary && alone.summary
+    ? `After ${(alone.summary.distance_m / 1000).toFixed(1)} km, odometry alone was ${metres(alone.summary.ekf_err_final_m)} from where it believed it was (${alone.summary.final_err_pct_of_distance}% of the distance flown), against ${metres(map.summary.ekf_err_final_m)} with map matching.`
+    : data.active ? "Flying both. This page updates as they go." : "";
+
+  const notes = [];
+  if (!o.compass_bias_deg && !o.height_bias_pct) notes.push("No lasting compass or height error is set, only errors that average out over a flight. A real compass usually has a lasting error of a few degrees, which only map fixes can remove, so this flatters odometry. Try Compass bias.");
+  notes.push("The simulated camera sees a flat image, so odometry has no parallax from buildings or trees, moving shadows or lens errors. Real odometry would drift more.");
+  if (!o.world_year && map) notes.push("The camera sees the map's own imagery, which flatters map matching. Choose another NAIP year under Camera imagery for a fair test. Odometry alone is unaffected.");
+  runs.forEach((run) => {
+    if (run.summary && run.summary.frames_off_imagery > 0) notes.push(`${SERIES[run.options.navigation || "map"].label}: the vehicle left the saved imagery for ${run.summary.frames_off_imagery} frames, where the simulated camera sees nothing. A real camera would still see ground. A wider corridor avoids this.`);
+  });
+  const list = $("notes");
+  list.replaceChildren(...notes.map((n) => { const li = document.createElement("li"); li.textContent = n; return li; }));
+}
+
+function draw() {
+  drawText();
+  drawTable();
+  legend($("errlegend"), false);
+  legend($("pathlegend"), true);
+  drawError();
+  drawPaths();
+  hideHover();
+}
+
+async function poll() {
+  try {
+    const r = await fetch(`/api/sim/compare/${encodeURIComponent(params.get("a"))}/${encodeURIComponent(params.get("b"))}`);
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+    data = await r.json();
+    runs = [...data.runs].sort((p, q) => ((p.options.navigation === "odometry") - (q.options.navigation === "odometry")));
+    if (hover === null) draw();
+    if (data.active) setTimeout(poll, 2000);
+  } catch (e) {
+    $("headline").textContent = `Could not load the comparison: ${e.message}`;
+  }
+}
+
+addEventListener("resize", () => { if (data) draw(); });
+poll();
+</script>
+</body>
+</html>

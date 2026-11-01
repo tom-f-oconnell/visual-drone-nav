@@ -187,19 +187,22 @@ async function refreshCells() {
 const ACTIVE = ["preparing", "fetching", "running"];
 let simulator = false, openRun = null, simTimer;
 
-function showSim(show) {
-  $("map").hidden = show;
-  $("simview").hidden = !show;
-  $("tab_plan").setAttribute("aria-pressed", !show);
-  $("tab_sim").setAttribute("aria-pressed", show);
-  if (!show) map.invalidateSize();
+function showView(name) {
+  $("map").hidden = name !== "plan";
+  $("simview").hidden = name !== "sim";
+  $("compareview").hidden = name !== "compare";
+  $("tab_plan").setAttribute("aria-pressed", name === "plan");
+  $("tab_sim").setAttribute("aria-pressed", name === "sim");
+  $("tab_compare").setAttribute("aria-pressed", name === "compare");
+  if (name === "plan") map.invalidateSize();
 }
-$("tab_plan").onclick = () => showSim(false);
-$("tab_sim").onclick = () => showSim(true);
+$("tab_plan").onclick = () => showView("plan");
+$("tab_sim").onclick = () => showView("sim");
+$("tab_compare").onclick = () => showView("compare");
 
 function updateSimButton() {
   const ready = simulator && routeCached && wps.length >= 2;
-  $("sim_run").disabled = !ready;
+  $("sim_run").disabled = $("sim_compare").disabled = !ready;
   $("sim_run").title = ready ? "" : "Add at least two waypoints and cache NAIP for the route first";
   if (ready) refreshYears();
 }
@@ -250,31 +253,51 @@ $("look_random").onclick = async () => {
   } catch (e) { alert(e.message); }
 };
 
-$("sim_run").onclick = async () => {
-  $("sim_run").disabled = true;
-  try {
-    const options = {
+function simRequest() {
+  return JSON.stringify({
+    mission: mission(),
+    options: {
       seed: +$("sim_seed").value, wind_speed: +$("sim_wind").value, wind_from_deg: +$("sim_wind_from").value,
       gust: +$("sim_gust").value, realtime: +$("sim_pace").value,
       world_year: $("sim_world").value ? +$("sim_world").value : null,
-      appearance: lookValues(),
-    };
-    const body = JSON.stringify({ mission: mission(), options });
-    const run = await (await api("/api/sim/runs", { method: "POST", body })).json();
+      appearance: lookValues(), navigation: $("sim_nav").value,
+      compass_bias_deg: +$("sim_compass").value, height_bias_pct: +$("sim_height").value,
+    },
+  });
+}
+
+$("sim_run").onclick = async () => {
+  $("sim_run").disabled = $("sim_compare").disabled = true;
+  try {
+    const run = await (await api("/api/sim/runs", { method: "POST", body: simRequest() })).json();
     await refreshRuns();
     followRun(run.id);
   } catch (e) { alert(e.message); }
   updateSimButton();
 };
 
-function followRun(id) {
+$("sim_compare").onclick = async () => {
+  $("sim_run").disabled = $("sim_compare").disabled = true;
+  try {
+    const [first] = await (await api("/api/sim/compare", { method: "POST", body: simRequest() })).json();
+    await refreshRuns();
+    followRun(first.id, "compare");
+  } catch (e) { alert(e.message); }
+  updateSimButton();
+};
+
+let openPartner = null, wantedView = "sim";
+function followRun(id, wanted = "sim") {
   clearTimeout(simTimer);
   openRun = id;
+  openPartner = null;
+  wantedView = wanted;
   const view = $("simview");
   delete view.dataset.run;
   view.removeAttribute("src");
-  showSim(false);
+  showView("plan");
   $("tabs").hidden = true;
+  $("tab_compare").hidden = true;
   $("sim_runs").value = id || "";
   $("sim_result").textContent = "";
   $("sim_progress").hidden = $("sim_stop").hidden = $("sim_delete").hidden = true;
@@ -303,12 +326,20 @@ function renderRun(run) {
   // The panel is long: keep the progress or the result in sight.
   if (run.state !== shownState) requestAnimationFrame(() => $("simsec").scrollIntoView({ block: "end" }));
   shownState = run.state;
+  openPartner = run.partner || null;
+  if (openPartner && $("tab_compare").hidden) {
+    const page = `/static/compare.html?a=${run.id}&b=${openPartner}`, frame = $("compareview");
+    if (frame.getAttribute("src") !== page) frame.src = page;
+    $("tab_compare").hidden = false;
+    $("tabs").hidden = false;
+    if (wantedView === "compare") showView("compare");
+  }
   const view = $("simview");
   if (run.viewable && view.dataset.run !== run.id) {
     view.dataset.run = run.id;
     view.src = `/sim/${run.id}/`;
     $("tabs").hidden = false;
-    showSim(true);
+    if (wantedView === "sim") showView("sim");
   }
   const active = ACTIVE.includes(run.state);
   $("sim_progress").hidden = !active;
@@ -338,20 +369,25 @@ function resultText(run) {
   const s = run.summary;
   const end = s.landed ? `Landed ${s.landing_error_m} m from the target.`
     : s.mission_complete ? `Reached the last waypoint, ${s.landing_error_m} m off.` : "Ran out of time before finishing.";
-  const note = run.options.world_year ? `Camera saw NAIP ${run.options.world_year}.`
-    : "The camera saw the map's own imagery, so this is optimistic.";
+  const alone = run.options.navigation === "odometry";
+  const note = (run.options.world_year ? `Camera saw NAIP ${run.options.world_year}.`
+    : alone ? "" : "The camera saw the map's own imagery, so this is optimistic.") +
+    (s.compass_bias_deg ? ` Compass bias ${s.compass_bias_deg}°.` : "") + (s.height_bias_pct ? ` Height bias ${s.height_bias_pct}%.` : "");
   const look = Object.entries(s.appearance || {}).map(([name, v]) => `${name.replace(/_/g, " ")} ${v}`).join(", ");
   return `${end} Position error: median ${s.ekf_err_median_m} m, 95% ${s.ekf_err_p95_m} m, ` +
-    `max ${s.ekf_err_max_m} m. Map fixes on ${Math.round(100 * s.fix_rate)}% of frames. ${note}` +
+    `max ${s.ekf_err_max_m} m. ${alone ? "Visual odometry only, no map fixes." : `Map fixes on ${Math.round(100 * s.fix_rate)}% of frames.`} ${note}` +
     (look ? ` Camera appearance: ${look}.` : "");
 }
 
-$("sim_stop").onclick = () => api(`/api/sim/runs/${openRun}/stop`, { method: "POST" }).catch((e) => alert(e.message));
+$("sim_stop").onclick = () => {
+  [openRun, openPartner].filter(Boolean).forEach((id) => api(`/api/sim/runs/${id}/stop`, { method: "POST" }).catch((e) => alert(e.message)));
+};
 
 $("sim_delete").onclick = async () => {
-  if (!confirm("Delete this simulation?")) return;
+  if (!confirm(openPartner ? "Delete this simulation and the one it was compared with?" : "Delete this simulation?")) return;
   try {
-    await api(`/api/sim/runs/${openRun}`, { method: "DELETE" });
+    await Promise.all([openRun, openPartner].filter(Boolean).map((id) => api(`/api/sim/runs/${id}`, { method: "DELETE" })));
+    $("compareview").removeAttribute("src");
     followRun(null);
     await refreshRuns();
   } catch (e) { alert(e.message); }
@@ -365,7 +401,8 @@ async function refreshRuns() {
   while (sel.options.length > 1) sel.remove(1);
   runs.forEach((r) => {
     const outcome = r.state === "finished" ? `${r.summary.ekf_err_median_m} m median` : r.state;
-    sel.add(new Option(`${r.name}, ${r.created.slice(5, 16).replace("T", " ")}: ${outcome}`, r.id));
+    const nav = r.options.navigation === "odometry" ? "odometry only, " : "";
+    sel.add(new Option(`${r.name}, ${r.created.slice(5, 16).replace("T", " ")}: ${nav}${outcome}`, r.id));
   });
   sel.value = openRun || "";
   return runs;

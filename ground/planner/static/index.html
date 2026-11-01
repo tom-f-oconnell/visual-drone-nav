@@ -58,6 +58,12 @@
         <label title="Compass direction the wind blows from: 0 is north, 90 east, 180 south, 270 west.">Wind from (deg) <input id="sim_wind_from" type="number" value="300" min="0" max="360" step="10"></label>
         <label title="Strength of the random gusts on top of the steady wind (standard deviation).">Gusts (m/s) <input id="sim_gust" type="number" value="1.5" min="0" max="15" step="0.5"></label>
         <label title="Picks the random gusts and sensor errors. The same seed repeats them; change it to fly another sample.">Random seed <input id="sim_seed" type="number" value="0" min="0"></label>
+        <label title="What the vehicle navigates by. Odometry and map matching is the normal mode: frame-to-frame odometry, corrected by matching frames against the saved NAIP map. Visual odometry only starts from the first waypoint's coordinates and adds up frame-to-frame motion, never looking at saved imagery, so nothing corrects its drift." class="wide">Navigation <select id="sim_nav">
+          <option value="map">Odometry and map matching</option>
+          <option value="odometry">Visual odometry only</option>
+        </select></label>
+        <label title="Heading error that lasts the whole flight, in degrees, such as from compass calibration. Map fixes learn and remove it. Odometry alone cannot, so each degree pushes it about 1.7% of the distance flown off course. 0 leaves only errors that average out, which flatters odometry.">Compass bias (deg) <input id="sim_compass" type="number" value="0" min="-45" max="45" step="0.5"></label>
+        <label title="Height error that lasts the whole flight, in percent, such as from ground higher than where height is measured from. It scales odometry's distances by the same percentage.">Height bias (%) <input id="sim_height" type="number" value="0" min="-50" max="50" step="1"></label>
         <label title="How fast the simulation runs. As fast as possible finishes soonest. Real time takes as long as the flight would. Either way you can pause it, change speed and replay it afterwards." class="wide">Pace <select id="sim_pace">
           <option value="0">As fast as possible</option>
           <option value="1">Real time</option>
@@ -88,6 +94,7 @@
         </div>
       </details>
       <button id="sim_run" class="primary" disabled>Run simulation</button>
+      <button id="sim_compare" disabled title="Fly this route twice with the same settings and seed, with map matching and on visual odometry alone, and show the two side by side. The Navigation setting above is ignored.">Compare with and without map matching</button>
       <div id="sim_progress" class="progress" hidden><div id="sim_bar" class="bar"></div><span id="sim_ptext" class="ptext"></span></div>
       <p id="sim_result"></p>
       <div class="row">
@@ -104,9 +111,11 @@
     <nav id="tabs" hidden>
       <button id="tab_plan" aria-pressed="true">Plan</button>
       <button id="tab_sim" aria-pressed="false">Simulation</button>
+      <button id="tab_compare" aria-pressed="false" hidden>Comparison</button>
     </nav>
     <main id="map"></main>
     <iframe id="simview" title="3D view of the simulated flight" hidden></iframe>
+    <iframe id="compareview" title="Comparison of two simulated flights" hidden></iframe>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

@@ -179,6 +179,35 @@ Median / p95 / landing error; 93% of frames got a fix in every cell:
 | NAIP 2020 | 3.9 / 8.2 / 3.1 m | 3.7 / 7.6 / 2.7 m | 3.8 / 7.7 / 2.4 m |
 | NAIP 2012 | 4.6 / 10.4 / 3.0 m | 5.3 / 10.6 / 3.1 m | 5.4 / 10.6 / 3.0 m |
 
+Map matching against visual odometry alone (`visnav compare`), on the same 5.2 km
+route with NAIP 2020 as the camera, three seeds, closed loop, mean over seeds. Odometry
+alone starts from the first waypoint's coordinates and never looks at the map's pixels.
+Median error / error at the end, then the end error as a share of distance flown:
+
+| lasting error | with map matching | odometry only |
+|---|---|---|
+| none | 3.9 / 2.1 m, 0.04% | 45 / 79 m, 1.5% |
+| compass 2° | 3.9 / 2.0 m, 0.04% | 104 / 175 m, 3.3% |
+| height 2% | 3.3 / 1.3 m, 0.03% | 51 / 80 m, 1.6% |
+
+* Map matching's error does not grow with distance; odometry's does. A 2° compass
+  error over 5.2 km should push it off by `sin 2°`, 181 m. It ended 175 m off on
+  average (129 to 253 m by seed), while map matching was unaffected.
+* Odometry itself reads distance well: known moves on real NAIP at cruise (120 m,
+  2.5 m per frame) read 0.997 of the truth. With no lasting error the drift is
+  what the simulated heading wander predicts, 75 m on this route (3° standard
+  deviation, 20 s correlation time).
+* The price of the map is compute and storage: about 105 ms against 22 ms per frame
+  with 18 flights running at once, and the imagery on board.
+* This flatters odometry: frames come from a flat image, so there is no parallax,
+  moving shadows or lens error to confuse it. The autopilot is also told to keep
+  trusting it (accuracy capped at 5 m, `ODOMETRY_ONLY_SIGMA`), since its reported
+  uncertainty only grows and an autopilot told so would stop following it. `visnav
+  run` refuses `--matcher none`, so a real flight still stops reporting a fix instead.
+* Frames with the camera past the corridor's imagery see nothing, unlike a real
+  camera, so a wide enough corridor matters when comparing. The comparison counts
+  them.
+
 ## Matcher benchmark (`bench/`)
 
 Twelve US sites (foothills, farm/suburb, Iowa row crops, Kansas pivots, Texas

@@ -10,6 +10,9 @@ planner, writing into its own directory under <data>/sim:
   summary.json   error statistics, written last
   error.txt      why it failed, if it did
 
+Two runs can be started as a comparison: the same flight with map matching and on
+odometry alone, each naming the other as its partner in run.json.
+
 The viewer follows records.jsonl, so a finished run replays the same way as a
 live one, and runs survive a restart of the planner. The temporary bundle (the
 map and camera GeoTIFFs) is deleted after each run, because it can be rebuilt
@@ -31,7 +34,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -43,6 +46,7 @@ MAX_RUNNING = 3
 ACTIVE_STATES = ("preparing", "fetching", "running")
 RUN_ID = re.compile(r"[0-9a-f]{8}")
 TAIL_BYTES = 1 << 18  # longer than any one record, thumbnail included
+SERIES_POINTS = 600  # of a flight, for the comparison page's charts
 
 
 def simulator_available() -> bool:
@@ -62,6 +66,9 @@ class SimOptions(BaseModel):
     realtime: float = Field(0.0, ge=0, le=100, description="multiple of real time, 0 for as fast as possible")
     world_year: int | None = Field(None, description="render the camera from this NAIP year instead of the map")
     appearance: dict[str, float] = Field(default_factory=dict, description="visnav.appearance.Appearance fields to change")
+    navigation: Literal["map", "odometry"] = Field("map", description="odometry alone never looks at the saved imagery")
+    compass_bias_deg: float = Field(0.0, ge=-45, le=45, description="heading error lasting the whole flight")
+    height_bias_pct: float = Field(0.0, ge=-50, le=50, description="height error lasting the whole flight")
 
 
 class SimRequest(BaseModel):
@@ -85,6 +92,7 @@ class SimRuns:
         self.root.mkdir(parents=True, exist_ok=True)
         self._live: dict[str, dict] = {}  # in-memory state of runs this process is executing
         self._lock = threading.Lock()
+        self._download_lock = threading.Lock()  # the two runs of a comparison need the same cells
 
     def dir(self, run_id: str) -> Path | None:
         """The run's directory, or None if there is no such run."""
@@ -92,22 +100,35 @@ class SimRuns:
             return None
         return self.root / run_id
 
+    def _start(self, mission: Mission, runs: list[tuple[str, SimOptions, str | None]]):
+        threads = [threading.Thread(target=self._execute, args=(run_id, mission, options), daemon=True)
+                   for run_id, options, _ in runs]
+        with self._lock:
+            if sum(1 for live in self._live.values() if not live["cancel"]) + len(runs) > MAX_RUNNING:
+                raise TooManyRuns(f"only {MAX_RUNNING} simulations can run at once")
+            for (run_id, _, _), thread in zip(runs, threads):
+                self._live[run_id] = {"state": "preparing", "proc": None, "cancel": False, "cells": None, "thread": thread}
+        for (run_id, options, partner), thread in zip(runs, threads):
+            d = self.root / run_id
+            d.mkdir()
+            (d / "run.json").write_text(json.dumps({
+                "id": run_id, "name": mission.name, "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "options": options.model_dump(), "partner": partner,
+            }))
+            thread.start()
+
     def start(self, mission: Mission, options: SimOptions) -> dict:
         """Start a run in the background. Raises TooManyRuns if too many are running already."""
         run_id = uuid.uuid4().hex[:8]
-        thread = threading.Thread(target=self._execute, args=(run_id, mission, options), daemon=True)
-        with self._lock:
-            if sum(1 for live in self._live.values() if not live["cancel"]) >= MAX_RUNNING:
-                raise TooManyRuns(f"{MAX_RUNNING} simulations are already running")
-            self._live[run_id] = {"state": "preparing", "proc": None, "cancel": False, "cells": None, "thread": thread}
-        d = self.root / run_id
-        d.mkdir()
-        (d / "run.json").write_text(json.dumps({
-            "id": run_id, "name": mission.name, "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "options": options.model_dump(),
-        }))
-        thread.start()
+        self._start(mission, [(run_id, options, None)])
         return self.info(run_id)
+
+    def compare(self, mission: Mission, options: SimOptions) -> list[dict]:
+        """Start the same flight with map matching and on odometry alone. Raises TooManyRuns as `start` does."""
+        a, b = uuid.uuid4().hex[:8], uuid.uuid4().hex[:8]
+        self._start(mission, [(a, options.model_copy(update={"navigation": "map"}), b),
+                              (b, options.model_copy(update={"navigation": "odometry"}), a)])
+        return [self.info(a), self.info(b)]
 
     def _execute(self, run_id: str, mission: Mission, options: SimOptions):
         d, live = self.root / run_id, self._live[run_id]
@@ -120,6 +141,9 @@ class SimRuns:
             # Wind "from" a direction blows toward the opposite one.
             speed, frm = options.wind_speed, math.radians(options.wind_from_deg)
             cmd += ["--wind-e", f"{-speed * math.sin(frm):.3f}", "--wind-n", f"{-speed * math.cos(frm):.3f}"]
+            cmd += ["--compass-bias", str(options.compass_bias_deg), "--height-bias", str(options.height_bias_pct)]
+            if options.navigation == "odometry":
+                cmd += ["--matcher", "none"]
             if options.appearance:
                 cmd += ["--appearance", ",".join(f"{k}={v}" for k, v in options.appearance.items())]
             if options.world_year:
@@ -147,8 +171,6 @@ class SimRuns:
     def _build_world(self, mission: Mission, year: int, bundle: Path, live: dict) -> Path:
         """Mosaic the corridor from one NAIP year, downloading the cells that are not cached."""
         cache = self.year_cache(year)
-        cells = [c for c in mission.required_cells() if not cache.has(c)]
-        live.update(state="fetching", cells={"done": 0, "total": len(cells)})
 
         def fetch(cell):
             if not live["cancel"]:
@@ -156,8 +178,11 @@ class SimRuns:
             with self._lock:
                 live["cells"]["done"] += 1
 
-        with ThreadPoolExecutor(max_workers=self.fetch_threads) as pool:
-            list(pool.map(fetch, cells))
+        with self._download_lock:
+            cells = [c for c in mission.required_cells() if not cache.has(c)]
+            live.update(state="fetching", cells={"done": 0, "total": len(cells)})
+            with ThreadPoolExecutor(max_workers=self.fetch_threads) as pool:
+                list(pool.map(fetch, cells))
         if live["cancel"]:
             return bundle
         path = bundle / "world.tif"
@@ -202,6 +227,34 @@ class SimRuns:
                 legs = len(json.loads((d / "scene.json").read_text())["plan"])
                 out["progress"] = {"t": rec["t"], "leg": rec["leg"], "legs": legs}
         return out
+
+    def series(self, run_id: str) -> dict | None:
+        """The flight so far, thinned, for charts: distance flown (km), position error and true path (m)."""
+        path = self.root / run_id / "records.jsonl"
+        if not path.exists():
+            return None
+        records = [json.loads(line) for line in path.read_bytes().split(b"\n")[:-1]]  # the last may be half written
+        if not records:
+            return None
+        km, flown = [], 0.0
+        for prev, r in zip(records[:1] + records, records):
+            flown += math.hypot(r["p"][0] - prev["p"][0], r["p"][1] - prev["p"][1])
+            km.append(flown / 1000)
+        keep = list(range(0, len(records), max(1, len(records) // SERIES_POINTS)))
+        keep += [] if keep[-1] == len(records) - 1 else [len(records) - 1]
+        return {
+            "km": [round(km[i], 4) for i in keep],
+            "err": [round(math.hypot(records[i]["p"][0] - records[i]["ekf"][0], records[i]["p"][1] - records[i]["ekf"][1]), 2) for i in keep],
+            "x": [records[i]["p"][0] for i in keep],
+            "y": [records[i]["p"][1] for i in keep],
+        }
+
+    def comparison(self, a: str, b: str) -> dict:
+        """What the comparison page shows of two runs."""
+        runs = [{**self.info(i), "series": self.series(i)} for i in (a, b)]
+        scenes = [self.root / i / "scene.json" for i in (a, b) if (self.root / i / "scene.json").exists()]
+        plan = json.loads(scenes[0].read_text())["plan"] if scenes else []
+        return {"runs": runs, "plan": [[p["x"], p["y"]] for p in plan], "active": any(r["state"] in ACTIVE_STATES for r in runs)}
 
     def list(self) -> list[dict]:
         """All runs, newest first."""

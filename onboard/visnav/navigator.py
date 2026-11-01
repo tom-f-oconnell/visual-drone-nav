@@ -4,7 +4,8 @@ The filter starts at the known start position (the vehicle is placed at the
 mission home), so there is a position to report, and the autopilot can arm,
 before any map fix. On the ground it is held still; in the air, frame-to-frame
 odometry carries it through takeoff, landing and gaps between map fixes; above
-min_map_alt, matches against the NAIP map correct the accumulated drift.
+min_map_alt, matches against the NAIP map correct the accumulated drift. With no
+matcher it runs on odometry alone, and the map's pixels are never looked at.
 """
 
 from __future__ import annotations
@@ -45,7 +46,8 @@ class Navigator:
                  odometry_drift: float = 0.05, odometry: FrameOdometry | None = None):
         """
         Args:
-            matcher: has locate(ortho, prior_col, prior_row, search_radius_px) -> Fix | None.
+            matcher: has locate(ortho, prior_col, prior_row, search_radius_px) -> Fix | None,
+                or None for odometry alone.
             start_sigma_m: 1-sigma of the start position; small when the
                 vehicle is placed at a known point, large to test acquisition.
             min_map_alt: m AGL below which frames are not matched to the map
@@ -119,7 +121,7 @@ class Navigator:
                 self.odometry_dist = dist
                 if self.kf.update_velocity(v[0], v[1], motion.sigma / motion.dt, t):
                     self.last_update_t = t
-        if h_agl < self.min_map_alt:
+        if self.matcher is None or h_agl < self.min_map_alt:
             return None
 
         lat, lon, sigma = self.prior(t)

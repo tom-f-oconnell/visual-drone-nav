@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import math
+import time
 from dataclasses import dataclass, field
 
 import cv2
@@ -33,6 +34,7 @@ from .ortho import CameraModel
 from .sim import SensorErrors, render, warm_up
 
 G = 9.81
+ODOMETRY_ONLY_SIGMA = 5.0  # m, position accuracy reported to the autopilot on odometry alone, see FlightSim.run
 
 
 @dataclass
@@ -53,6 +55,8 @@ class SimConfig:
     att_noise_deg: float = 1.0                 # slowly varying AHRS errors (see sim.SensorErrors)
     yaw_noise_deg: float = 3.0
     alt_noise_frac: float = 0.01
+    compass_bias_deg: float = 0.0              # lasting errors, which only map fixes can correct
+    height_bias_pct: float = 0.0
     min_vision_alt: float = 25.0               # map matching only above this; odometry below
     max_update_age: float = 4.0
     lost_sigma: float = 60.0
@@ -129,11 +133,16 @@ class FlightSim:
         self.ekf = [AxisEKF(self.home[0], self.cfg.accel_noise * 3), AxisEKF(self.home[1], self.cfg.accel_noise * 3)]
         self.bias = self.rng.normal(0, self.cfg.accel_bias, 2)
         self.sensors = SensorErrors(self.rng, self.cfg.att_noise_deg, self.cfg.yaw_noise_deg,
-                                    h_frac=self.cfg.alt_noise_frac)
+                                    h_frac=self.cfg.alt_noise_frac, yaw_bias_deg=self.cfg.compass_bias_deg,
+                                    h_bias_frac=self.cfg.height_bias_pct / 100)
         self.gust = np.zeros(2)
         self.t = 0.0
         self.leg = 0
         self.landed = False
+
+    @property
+    def odometry_only(self) -> bool:
+        return self.nav is not None and self.nav.matcher is None
 
     # Frames -----------------------------------------------------------------
     def _ll_to_local(self, lat, lon):
@@ -153,6 +162,7 @@ class FlightSim:
             "home": [float(self.home[0]), float(self.home[1])],
             "plan": [{"kind": k, "x": float(x), "y": float(y), "alt": float(a)} for k, x, y, a in self.plan],
             "name": self.meta["mission"]["name"],
+            "navigation": "odometry" if self.odometry_only else "map",
             "camera": {"hfov_deg": math.degrees(2 * math.atan(self.cam.width / 2 / self.cam.fx)),
                        "aspect": self.cam.height / self.cam.width},
             "gsd": self.map.gsd,
@@ -232,7 +242,8 @@ class FlightSim:
         dt = 1 / cfg.physics_hz
         next_cam = next_gps = next_rec = next_thumb = 0.0
         records, fixes, thumb = [], 0, None
-        frames = map_frames = 0
+        frames = map_frames = off_imagery = 0
+        nav_time = 0.0
         last_fix = None
         while not self.landed and self.leg < len(self.plan) and self.t < cfg.max_time:
             est_p = np.array([self.ekf[0].x[0], self.ekf[1].x[0]])
@@ -249,11 +260,15 @@ class FlightSim:
                 img = None
                 if tr.p[2] > 0.3:  # on the ground the camera sees only the landing gear's shadow
                     lat, lon = self._local_to_ll(tr.p[0], tr.p[1])
-                    img = self.look(render(self.world, self.cam, lat, lon, tr.p[2], tr.roll, tr.pitch, tr.yaw), self.t)
+                    raw = render(self.world, self.cam, lat, lon, tr.p[2], tr.roll, tr.pitch, tr.yaw)
+                    off_imagery += int(np.mean(raw[..., 1] == 0) > 0.5)
+                    img = self.look(raw, self.t)
                     frames += 1
                     map_frames += int(tr.p[2] >= cfg.min_vision_alt)
                 roll, pitch, yaw, h = self.sensors(self.t, tr.roll, tr.pitch, tr.yaw, tr.p[2])
+                nav_start = time.perf_counter()
                 fix = self.nav.process(img, self.t, roll, pitch, yaw, max(h, 0.0))
+                nav_time += time.perf_counter() - nav_start
                 if fix:
                     fixes += 1
                     last_fix = self._ll_to_local(fix.lat, fix.lon).tolist() + [round(fix.score, 1)]
@@ -265,11 +280,15 @@ class FlightSim:
             if self.t >= next_gps:
                 next_gps += 1 / cfg.gps_rate_hz
                 st = self.nav.state(self.t)
-                if st and st.last_update_age < cfg.max_update_age and st.sigma_m < cfg.lost_sigma:
+                # Nothing corrects odometry alone, so its reported uncertainty only grows, and an autopilot told that
+                # would soon stop following it and fly on its IMU. To measure odometry rather than that, keep trusting it.
+                alone = self.odometry_only
+                if st and st.last_update_age < cfg.max_update_age and (alone or st.sigma_m < cfg.lost_sigma):
                     # Position only, as ArduPilot is set up (EK3_SRC1_VELXY 0): velocity comes from the IMU.
                     x, y = self._ll_to_local(st.lat, st.lon)
+                    sigma = min(st.sigma_m, ODOMETRY_ONLY_SIGMA) if alone else st.sigma_m
                     for i, z in enumerate((x, y)):
-                        self.ekf[i].update_pos(z, max(st.sigma_m, 1.0))
+                        self.ekf[i].update_pos(z, max(sigma, 1.0))
 
             if self.t >= next_rec:
                 next_rec += 1 / cfg.record_hz
@@ -299,7 +318,11 @@ class FlightSim:
                              if low < r["p"][2] <= high])
 
         errs, low = err(0.3, np.inf), err(0.3, cfg.min_vision_alt)
+        path = np.array([r["p"][:2] for r in records])
+        distance = float(np.hypot(*np.diff(path, axis=0).T).sum()) if len(path) > 1 else 0.0
+        final = math.hypot(records[-1]["p"][0] - records[-1]["ekf"][0], records[-1]["p"][1] - records[-1]["ekf"][1]) if records else 0.0
         summary = {
+            "navigation": "odometry" if self.odometry_only else "map",
             "duration_s": round(self.t, 1), "landed": self.landed,
             "mission_complete": self.landed or self.leg >= len(self.plan), "camera_frames": frames,
             "vision_fixes": fixes, "fix_rate": round(fixes / max(map_frames, 1), 3),
@@ -307,8 +330,15 @@ class FlightSim:
             "ekf_err_p95_m": round(float(np.percentile(errs, 95)), 2) if len(errs) else None,
             "ekf_err_max_m": round(float(errs.max()), 2) if len(errs) else None,
             "ekf_err_below_map_alt_max_m": round(float(low.max()), 2) if len(low) else None,
+            "ekf_err_final_m": round(final, 2),
+            "distance_m": round(distance, 1),
+            "final_err_pct_of_distance": round(100 * final / distance, 2) if distance else None,
+            "nav_ms_per_frame": round(1000 * nav_time / max(frames, 1), 1),
+            "frames_off_imagery": off_imagery,
             "landing_error_m": round(float(np.linalg.norm(self.truth.p[:2] - np.array(self.plan[-1][1:3]))), 2),
             "appearance": cfg.appearance.changes(),
+            "compass_bias_deg": cfg.compass_bias_deg,
+            "height_bias_pct": cfg.height_bias_pct,
         }
         return records, summary
 

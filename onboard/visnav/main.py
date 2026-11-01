@@ -4,6 +4,7 @@
   visnav sim    --bundle DIR                                         synthetic flight, error stats
   visnav upload --bundle DIR --mavlink /dev/ttyTHS1                  upload the mission to the FC
   visnav sim3d  --bundle DIR                                         closed-loop flight sim + 3D viewer
+  visnav compare --bundle DIR                                        the same flight with and without map matching
   visnav view   --bundle DIR --mavlink udpin:0.0.0.0:14551           3D viewer following SITL or a vehicle
 """
 
@@ -13,8 +14,10 @@ import argparse
 import csv
 import json
 import logging
+import multiprocessing
 import threading
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -56,7 +59,10 @@ def camera_from_args(args, meta) -> CameraModel:
 
 
 def build_matcher(args, map_):
-    """args.matcher: "corr", a feature type, or several joined by "+" to try in that order."""
+    """args.matcher: "corr", a feature type, several joined by "+" to try in that order, or "none"."""
+    if args.matcher == "none":
+        return None
+
     def one(name):
         if name == "corr":
             return CorrMatcher(map_, min_score=args.min_score)
@@ -77,6 +83,8 @@ def cmd_run(args):
     from .camera import FrameGrabber
     from .mavlink_io import Autopilot
 
+    if args.matcher == "none":
+        raise SystemExit("--matcher none is for the simulators (sim, sim3d, compare), not for flying: nothing corrects its drift")
     bundle, meta, map_ = load_bundle(args.bundle)
     cam = camera_from_args(args, meta)
     ap = Autopilot(args.mavlink, args.baud)
@@ -162,9 +170,12 @@ def cmd_sim(args):
     look = CameraLook(appearance_from_args(args), [args.seed, 1])
     route = [(w["lat"], w["lon"], w["alt"] or meta["mission"]["default_alt"]) for w in meta["mission"]["waypoints"]]
     # Start the filter from a deliberately wrong position to exercise acquisition.
-    lon0, lat0, _ = GEOD.fwd(route[0][1], route[0][0], rng.uniform(0, 360), args.start_error)
+    # Odometry alone has no way to find its way back from a wrong start.
+    start_error = 0.0 if args.matcher == "none" else args.start_error
+    lon0, lat0, _ = GEOD.fwd(route[0][1], route[0][0], rng.uniform(0, 360), start_error)
     nav = build_navigator(args, meta, map_, cam, (lat0, lon0))
-    sensors = SensorErrors(rng, args.att_noise, args.yaw_noise, h_frac=args.alt_noise)
+    sensors = SensorErrors(rng, args.att_noise, args.yaw_noise, h_frac=args.alt_noise,
+                           yaw_bias_deg=args.compass_bias, h_bias_frac=args.height_bias / 100)
     errs, fixes, n, comp = [], 0, 0, []
     for pose in fly_route(map_, route, meta["mission"]["speed"], args.rate, rng):
         if args.frames and n >= args.frames:
@@ -214,16 +225,24 @@ def write_atomic(path: Path, text: str):
     tmp.replace(path)
 
 
-def cmd_sim3d(args):
-    from .flightsim import FlightSim, SimConfig, map_texture
-    from .viewer import FlightFeed, export_html, serve
+def build_flight(args):
+    """The closed-loop flight sim3d and compare fly."""
+    from .flightsim import FlightSim, SimConfig
 
     _, meta, map_ = load_bundle(args.bundle)
     cam = camera_from_args(args, meta)
     nav = build_navigator(args, meta, map_, cam)
     cfg = SimConfig(seed=args.seed, camera_hz=args.camera_hz, wind=(args.wind_e, args.wind_n),
-                    gust_sigma=args.gust, min_vision_alt=args.min_alt, appearance=appearance_from_args(args))
-    sim = FlightSim(map_, cam, nav, meta, cfg, world=load_world(args, map_))
+                    gust_sigma=args.gust, min_vision_alt=args.min_alt, appearance=appearance_from_args(args),
+                    compass_bias_deg=args.compass_bias, height_bias_pct=args.height_bias)
+    return FlightSim(map_, cam, nav, meta, cfg, world=load_world(args, map_)), map_
+
+
+def cmd_sim3d(args):
+    from .flightsim import map_texture
+    from .viewer import FlightFeed, export_html, serve
+
+    sim, map_ = build_flight(args)
     feed = FlightFeed(sim.scene(), map_texture(map_))
     if args.port:
         serve(feed, args.port, args.host)
@@ -266,6 +285,32 @@ def cmd_sim3d(args):
     return summary
 
 
+def _compare_flight(job) -> dict:
+    args, matcher, seed = job
+    return build_flight(argparse.Namespace(**{**vars(args), "matcher": matcher, "seed": seed}))[0].run()[1]
+
+
+def cmd_compare(args):
+    """Fly each seed with map matching and on odometry alone, and print how they differ."""
+    seeds = range(args.seed, args.seed + args.seeds)
+    jobs = [(args, matcher, seed) for seed in seeds for matcher in (args.matcher, "none")]
+    with ProcessPoolExecutor(args.jobs, mp_context=multiprocessing.get_context("spawn")) as pool:
+        flights = list(pool.map(_compare_flight, jobs))
+    with_map, alone = flights[::2], flights[1::2]
+    rows = [("error, median (m)", "ekf_err_median_m"), ("error, 95% (m)", "ekf_err_p95_m"), ("error, largest (m)", "ekf_err_max_m"),
+            ("error at the end (m)", "ekf_err_final_m"), ("  as % of distance", "final_err_pct_of_distance"),
+            ("off target at the end (m)", "landing_error_m"), ("map fixes (fraction of frames)", "fix_rate"),
+            ("navigator ms per frame", "nav_ms_per_frame"), ("frames off the imagery", "frames_off_imagery")]
+    print(f"mean of {len(seeds)} seed(s), {with_map[0]['distance_m'] / 1000:.1f} km, compass bias {args.compass_bias} deg, "
+          f"height bias {args.height_bias}%")
+    print(f"{'':32s}{'with map matching':>20s}{'odometry only':>16s}")
+    for label, key in rows:
+        print(f"{label:32s}{np.mean([f[key] for f in with_map]):20.2f}{np.mean([f[key] for f in alone]):16.2f}")
+    if args.json:
+        Path(args.json).write_text(json.dumps({"with_map": with_map, "odometry_only": alone}, indent=2))
+    return with_map, alone
+
+
 def cmd_view(args):
     from .flightsim import FlightSim, map_texture
     from .mavlink_io import Autopilot
@@ -293,7 +338,8 @@ def main(argv=None):
         sp.add_argument("--bundle", required=True, help="unzipped mission bundle directory")
         sp.add_argument("--calib", help="camera calibration JSON (default: from mission camera HFOV)")
         sp.add_argument("--matcher", default="corr",
-                        help='"corr", "orb", "akaze", "sift", or several joined by "+" to try in that order')
+                        help='"corr", "orb", "akaze", "sift", or several joined by "+" to try in that order; '
+                             'in the simulators, "none" for odometry alone, never looking at the map\'s imagery')
         sp.add_argument("--min-score", type=float, default=2.6, help="correlation score required of a fix")
         sp.add_argument("--nfeatures", type=int, default=3000)
         sp.add_argument("--min-inliers", type=int, default=20, help="RANSAC inliers required of a feature fix")
@@ -310,6 +356,12 @@ def main(argv=None):
                         help='how simulated frames differ from that imagery: "name=value,..." with gamma, red, green, '
                              "blue, blur, noise, brightness_drift, color_drift, gamma_drift, drift_tau_s, or "
                              '"random" for realistic values (from --seed where there is one). Default: no change')
+
+    def lasting_errors(sp):
+        sp.add_argument("--compass-bias", type=float, default=0.0,
+                        help="deg of heading error lasting all flight, which only map fixes can correct")
+        sp.add_argument("--height-bias", type=float, default=0.0,
+                        help="%% height error lasting all flight, which scales odometry")
 
     r = sub.add_parser("run", help="fly: camera + MAVLink")
     common(r)
@@ -338,6 +390,7 @@ def main(argv=None):
     s.add_argument("--att-noise", type=float, default=1.0, help="deg roll/pitch error (slowly varying)")
     s.add_argument("--yaw-noise", type=float, default=3.0, help="deg heading error (slowly varying)")
     s.add_argument("--alt-noise", type=float, default=0.01, help="fractional height error")
+    lasting_errors(s)
     s.set_defaults(func=cmd_sim)
 
     u = sub.add_parser("upload", help="upload mission.waypoints to the FC")
@@ -363,7 +416,22 @@ def main(argv=None):
     f.add_argument("--exit", action="store_true", help="exit when the flight ends instead of serving on")
     f.add_argument("--run-dir", help="existing directory to write scene.json, map.jpg, records.jsonl (as the flight "
                                      "goes) and summary.json to; the planner website follows runs this way")
+    lasting_errors(f)
     f.set_defaults(func=cmd_sim3d)
+
+    c = sub.add_parser("compare", help="fly the same mission with and without map matching")
+    common(c)
+    simulated_camera(c)
+    lasting_errors(c)
+    c.add_argument("--seed", type=int, default=0, help="first seed")
+    c.add_argument("--seeds", type=int, default=3, help="how many seeds to fly each way")
+    c.add_argument("--jobs", type=int, default=6, help="flights at once")
+    c.add_argument("--camera-hz", type=float, default=4.0)
+    c.add_argument("--wind-e", type=float, default=3.0, help="m/s wind toward east")
+    c.add_argument("--wind-n", type=float, default=-1.5, help="m/s wind toward north")
+    c.add_argument("--gust", type=float, default=1.5, help="m/s gust strength")
+    c.add_argument("--json", help="write every flight's summary here")
+    c.set_defaults(func=cmd_compare)
 
     w = sub.add_parser("view", help="3D viewer following ArduPilot SITL or a vehicle over MAVLink")
     w.add_argument("--bundle", required=True)

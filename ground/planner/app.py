@@ -285,8 +285,7 @@ def list_sim_runs():
     return sim_runs.list()
 
 
-@app.post("/api/sim/runs")
-def start_sim_run(req: SimRequest):
+def _check_can_simulate(req: SimRequest):
     if not simulator_available():
         raise HTTPException(503, "the simulator is not installed: pip install -e onboard --no-deps")
     if len(req.mission.waypoints) < 2:
@@ -300,10 +299,32 @@ def start_sim_run(req: SimRequest):
     missing = [c.key for c in req.mission.required_cells() if not cache.has(c)]
     if missing:
         raise HTTPException(409, f"{len(missing)} NAIP cells not cached yet; run 'Cache NAIP' first")
+
+
+@app.post("/api/sim/runs")
+def start_sim_run(req: SimRequest):
+    _check_can_simulate(req)
     try:
         return sim_runs.start(req.mission, req.options)
     except TooManyRuns as exc:
         raise HTTPException(429, str(exc)) from exc
+
+
+@app.post("/api/sim/compare")
+def start_sim_compare(req: SimRequest):
+    """Fly the route twice with the same options: with map matching and on odometry alone."""
+    _check_can_simulate(req)
+    try:
+        return sim_runs.compare(req.mission, req.options)
+    except TooManyRuns as exc:
+        raise HTTPException(429, str(exc)) from exc
+
+
+@app.get("/api/sim/compare/{a}/{b}")
+def sim_compare(a: str, b: str):
+    _run_dir(a)
+    _run_dir(b)
+    return sim_runs.comparison(a, b)
 
 
 @app.get("/api/sim/runs/{run_id}")

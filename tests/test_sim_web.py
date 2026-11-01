@@ -170,6 +170,37 @@ def test_camera_appearance(client):
     assert run["summary"]["appearance"] == {k: v for k, v in values.items() if k != "blue"}
 
 
+def test_compare_with_and_without_map_matching(client):
+    """Both flights get the same settings, name each other, and the comparison page has what it needs."""
+    options = {"seed": 3, "compass_bias_deg": 3.0, "navigation": "odometry"}
+    a, b = client.post("/api/sim/compare", json={"mission": mission("cmp"), "options": options}).json()
+    assert (a["partner"], b["partner"]) == (b["id"], a["id"])
+    assert [a["options"]["navigation"], b["options"]["navigation"]] == ["map", "odometry"]
+    assert a["options"]["seed"] == b["options"]["seed"] == 3
+
+    # Another comparison does not fit alongside these, and neither flight of it starts.
+    before = len(client.get("/api/sim/runs").json())
+    assert client.post("/api/sim/compare", json={"mission": mission("cmp2")}).status_code == 429
+    assert len(client.get("/api/sim/runs").json()) == before
+
+    runs = [wait_for(client, r["id"], ("finished", "failed", "stopped")) for r in (a, b)]
+    assert all(r["state"] == "finished" for r in runs), runs
+    with_map, alone = runs[0]["summary"], runs[1]["summary"]
+    assert with_map["navigation"] == "map" and alone["navigation"] == "odometry"
+    assert with_map["vision_fixes"] > 0 and alone["vision_fixes"] == 0
+    assert alone["compass_bias_deg"] == with_map["compass_bias_deg"] == 3.0
+
+    data = client.get(f"/api/sim/compare/{a['id']}/{b['id']}").json()
+    assert not data["active"] and len(data["plan"]) >= 3
+    for run in data["runs"]:
+        s = run["series"]
+        assert len(s["km"]) == len(s["err"]) == len(s["x"]) == len(s["y"]) > 10
+        assert s["km"] == sorted(s["km"]) and s["km"][-1] == pytest.approx(run["summary"]["distance_m"] / 1000, abs=0.01)
+    page = client.get(f"/static/compare.html?a={a['id']}&b={b['id']}")
+    assert page.status_code == 200 and "Odometry only" in page.text
+    assert client.get(f"/api/sim/compare/{a['id']}/00000000").status_code == 404
+
+
 def test_every_field_explains_itself_on_hover(client):
     """Each input and select has a title of its own or from the label around it."""
 
@@ -208,8 +239,8 @@ def test_refusals(client):
     assert client.post("/api/sim/runs", json={"mission": {**mission(), "waypoints": []}}).status_code == 400
     far = {**mission(), "waypoints": [{"lat": 44.0, "lon": -100.0}, {"lat": 44.01, "lon": -100.0}]}
     assert client.post("/api/sim/runs", json={"mission": far}).status_code == 409
-    bad = {"mission": mission(), "options": {"wind_speed": -1}}
-    assert client.post("/api/sim/runs", json=bad).status_code == 422
+    for options in ({"wind_speed": -1}, {"navigation": "nonsense"}, {"compass_bias_deg": 90}):
+        assert client.post("/api/sim/runs", json={"mission": mission(), "options": options}).status_code == 422
     for look in ({"gamma": 0}, {"red": 99}, {"nonsense": 1}):
         r = client.post("/api/sim/runs", json={"mission": mission(), "options": {"appearance": look}})
         assert r.status_code == 422 and "camera appearance" in r.json()["detail"], r.text

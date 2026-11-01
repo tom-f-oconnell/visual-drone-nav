@@ -85,11 +85,15 @@ class SensorErrors:
     An autopilot's attitude and heading errors drift slowly rather than jumping
     every frame, so they are first-order Gauss-Markov processes plus a little
     white noise. Height error grows with height, like a lidar rangefinder's.
+    Those average out over a flight; a compass calibration error or ground higher
+    than the height is measured from does not, hence the lasting biases.
     """
 
     def __init__(self, rng: np.random.Generator, att_deg: float = 1.0, yaw_deg: float = 3.0,
-                 tau_s: float = 20.0, white_deg: float = 0.1, h_min: float = 0.05, h_frac: float = 0.01):
+                 tau_s: float = 20.0, white_deg: float = 0.1, h_min: float = 0.05, h_frac: float = 0.01,
+                 yaw_bias_deg: float = 0.0, h_bias_frac: float = 0.0):
         self.rng = rng
+        self.yaw_bias, self.h_bias = math.radians(yaw_bias_deg), h_bias_frac
         self.sigma = np.radians([att_deg, att_deg, yaw_deg])
         self.tau, self.white = tau_s, math.radians(white_deg)
         self.h_min, self.h_frac = h_min, h_frac
@@ -103,7 +107,8 @@ class SensorErrors:
             self.bias = self.bias * a + self.rng.normal(0, self.sigma * math.sqrt(1 - a * a))
         self.t = t
         r, p, y = np.array([roll, pitch, yaw]) + self.bias + self.rng.normal(0, self.white, 3)
-        return float(r), float(p), float(y), h + self.rng.normal(0, self.h_min + self.h_frac * abs(h))
+        h_measured = h * (1 + self.h_bias) + self.rng.normal(0, self.h_min + self.h_frac * abs(h))
+        return float(r), float(p), float(y + self.yaw_bias), h_measured
 
 
 @dataclass

@@ -150,6 +150,7 @@ function lineGeom(n) {
 function build(info, mapUrl) {
   S = info;
   $("title").firstChild.textContent = info.name;
+  if (info.navigation === "odometry") $("subtitle").textContent = "GPS denied · visual odometry only";
   const [w, s, e, n] = info.extent;
   const tex = new THREE.TextureLoader().load(mapUrl);
   tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
@@ -314,7 +315,7 @@ function update() {
   const chip = $("navchip");
   if (p[2] < 1) { chip.className = "chip idle"; chip.textContent = "on ground"; }
   else if (r.vis) { chip.className = "chip ok"; chip.textContent = "vision lock"; }
-  else { chip.className = "chip warn"; chip.textContent = "dead reckoning"; }
+  else { chip.className = "chip warn"; chip.textContent = S.navigation === "odometry" ? "odometry only" : "dead reckoning"; }
   for (let k = i; k >= 0 && k > i - 40; k--) if (records[k].img) { if (lastThumb !== k) { $("thumb").src = "data:image/jpeg;base64," + records[k].img; lastThumb = k; } break; }
   $("clock").textContent = `${fmt(t)} / ${fmt(duration())}${live ? " live" : ""}`;
   if (!scrubbing) $("scrub").value = duration() ? Math.round(1000 * t / duration()) : 0;
