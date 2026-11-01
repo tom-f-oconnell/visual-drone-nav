@@ -162,11 +162,12 @@ def test_camera_appearance(client):
     values = client.get("/api/sim/appearance/random").json()
     assert set(values) == set(REALISTIC)
     assert all(REALISTIC[k][0] <= v <= REALISTIC[k][1] for k, v in values.items())
+    values["gamma"], values["blue"] = 1.1, 1.0  # the summary lists changes, and a random value can round to its default
     run_id = client.post("/api/sim/runs", json={"mission": mission("look"), "options": {"appearance": values}}).json()["id"]
     run = wait_for(client, run_id, ("finished", "failed", "stopped"))
     assert run["state"] == "finished", run
     assert run["options"]["appearance"] == values
-    assert run["summary"]["appearance"] == values
+    assert run["summary"]["appearance"] == {k: v for k, v in values.items() if k != "blue"}
 
 
 def test_every_field_explains_itself_on_hover(client):
