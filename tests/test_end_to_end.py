@@ -182,3 +182,22 @@ def test_waypoint_counts_as_reached_only_at_its_height(tmp_path):
     sim.truth.p[2] = 299.0
     sim._control(sim.home, np.zeros(2), 0.02)
     assert sim.leg == 2
+
+
+def test_vehicle_cannot_lean_past_its_limit_however_wrong_its_estimate(tmp_path):
+    """Without this a badly lost estimate pitched it almost to vertical, at thousands of metres per second."""
+    from visnav.flightsim import FlightSim, SimConfig
+    from visnav.geo import MapRaster
+    from visnav.ortho import CameraModel
+    from visnav.sim import synthetic_map
+
+    world = MapRaster.load(synthetic_map(str(tmp_path / "m_s_20220701.tif"), LAT, LON, size_m=800, gsd=2.0, seed=1))
+    meta = {"home": {"lat": LAT, "lon": LON}, "mission": {"default_alt": 100, "takeoff_alt": 30, "speed": 10, "end_action": "land", "name": "t",
+                                                          "waypoints": [{"lat": LAT + 0.002, "lon": LON, "alt": None}]}}
+    sim = FlightSim(world, CameraModel.from_hfov(160, 100, 90), None, meta, SimConfig())
+    sim.leg = 1
+    sim.truth.p[2] = 100.0
+    for _ in range(3000):
+        sim._control(sim.home, np.array([500.0, -500.0]), 0.02)  # told it is flying very fast
+        assert math.hypot(sim.truth.pitch, sim.truth.roll) <= math.radians(30.001)
+    assert np.hypot(*sim.truth.v[:2]) < 60

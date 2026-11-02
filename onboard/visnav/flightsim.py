@@ -45,6 +45,7 @@ class SimConfig:
     gps_rate_hz: float = 5.0
     max_speed: float = 10.0
     max_accel: float = 3.5
+    max_tilt_deg: float = 30.0                 # ArduCopter's default ANGLE_MAX
     climb_rate: float = 3.0
     land_rate: float = 1.5
     accept_radius: float = 6.0
@@ -235,6 +236,10 @@ class FlightSim:
         a_right = -a_cmd[1] * sy + a_cmd[0] * cy
         pitch_cmd = -math.atan2(a_fwd, G)
         roll_cmd = math.atan2(a_right * math.cos(pitch_cmd), G)
+        tilt = math.hypot(pitch_cmd, roll_cmd)
+        if tilt > math.radians(self.cfg.max_tilt_deg):
+            pitch_cmd *= math.radians(self.cfg.max_tilt_deg) / tilt
+            roll_cmd *= math.radians(self.cfg.max_tilt_deg) / tilt
         k = dt / 0.15
         tr.pitch += (pitch_cmd - tr.pitch) * k
         tr.roll += (roll_cmd - tr.roll) * k

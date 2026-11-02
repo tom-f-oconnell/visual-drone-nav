@@ -227,25 +227,25 @@ Sentinel-2 from October 2026, over suburbs, farmland and foothills, with 1° att
 | 500 m | 100 x 63 | 98% | 14 m | 1 |
 
 Closed-loop `sim3d` flights of 2.5 km, the same three sites, two seeds each, with a
-2° compass bias and the camera seeing NAIP, which for the NAIP row is the map's own
-imagery, so that row is optimistic. "Fixes" counts all frames above 25 m, so it includes
-the climb and descent, below where a coarse map can match:
+2° compass bias and the camera seeing NAIP from an earlier year than the map's. "Fixes"
+counts all frames above 25 m, so it includes the climb and descent, below where a coarse
+map can match:
 
 | map, height | median | p95 | error at the end | fixes |
 |---|---|---|---|---|
-| NAIP, 120 m | 3.5 m | 6.7 m | 0.7 m | 88% |
-| Sentinel-2, 120 m | 65 m | 237 m | 262 m | 0% |
-| Sentinel-2, 200 m | 10.5 m | 27 m | 7 m | 46% |
-| Sentinel-2, 300 m | 9.8 m | 26 m | 6 m | 57% |
-| Sentinel-2, 500 m | 11.5 m | 29 m | 6 m | 69% |
-| none (odometry only), 120 m | 38 m | | 59 m | 0% |
+| NAIP, 120 m | 3.5 m | 9.3 m | 1.3 m | 86% |
+| Sentinel-2, 120 m | 42 m | 106 m | 111 m | 0% |
+| Sentinel-2, 200 m | 13 m | 22 m | 12 m | 44% |
+| Sentinel-2, 300 m | 11 m | 23 m | 9 m | 62% |
+| Sentinel-2, 500 m | 12 m | 31 m | 9 m | 73% |
+| none (odometry only), 120 m | 50 m | 104 m | 100 m | 0% |
 
-* At 120 m a Sentinel-2 plan is worse than the odometry-only comparison. With no fixes
-  its reported uncertainty passes `lost_sigma` (60 m) after about 1.2 km, visnav stops
+* At 120 m a Sentinel-2 plan does no better than odometry alone. With no fixes its
+  reported uncertainty passes `lost_sigma` (60 m) after about 1.2 km, visnav stops
   reporting a position, and the autopilot falls back on its IMU. On a real flight the
   EKF failsafe would land it. Odometry-only mode is told to keep trusting odometry
   because it exists to measure it. So the planner warns below a 600 m footprint.
-* From 200 m up it holds about 10 m with no growth over distance, and removes a
+* From 200 m up it holds about 12 m with no growth over distance, and removes a
   lasting compass error as NAIP does, though about three times less accurately.
 * Those heights are over the 122 m Part 107 limit, so this needs a waiver or another
   jurisdiction. The rangefinder in `docs/ardupilot_visnav.parm` will not reach them
@@ -288,7 +288,47 @@ edges are foggier. `density` varies by fractal noise sampled where each ray meet
 ground, drifting with the steady wind, for banks and holes. It is traced on a grid of
 rays every 16 pixels and interpolated. Density does not vary with height, slant paths
 take the density of where they land, and fog also fades clouds, which at those heights
-would be above it. This is a best guess, not fitted to real fog imagery.
+would be above it. This is a best guess, not fitted to real fog imagery. Without some
+sensor noise fog is too easy, as contrast can be recovered perfectly, so the flights
+below have 1%.
+
+Measured on real imagery, in the flights described under Sentinel-2 above: three sites,
+2.5 km, 2° compass bias, a camera seeing NAIP from an earlier year than the map's.
+Median / p95 / error at the end, and fixes (all frames above 25 m). Fog, two seeds per
+site on NAIP and one on Sentinel-2:
+
+| visibility, layer top | NAIP map, 120 m | Sentinel-2 map, 300 m |
+|---|---|---|
+| 5 km, 1500 m | 3.5 / 9.2 / 1.0 m, 86% | |
+| 1.5 km, 400 m | 3.5 / 9.2 / 0.9 m, 86% | 12 / 25 / 10 m, 50% |
+| 800 m, 200 m | 3.4 / 8.9 / 0.9 m, 85% | |
+| 400 m, 200 m | 3.4 / 8.8 / 1.1 m, 80% | 98 / 806 / 930 m, 1% |
+| 200 m, 200 m | 3.8 / 20 / 1.4 m, 53% | 71 / 472 / 568 m, 0% |
+| 100 m, 150 m | 92 / 382 / 400 m, 3% | 271 / 1257 / 1444 m, 0% |
+
+NAIP at 120 m holds until about a tenth of the contrast is left, and Sentinel-2, higher up
+with less detail to lose, gives out far sooner. Clouds, from 8 passes per site drawn from
+all of 2024 however cloudy, one seed: over the route 13 passes were clear, 5 partly
+cloudy and 6 overcast, a tile's own percentage saying little about which:
+
+| flight | clear | partly | overcast |
+|---|---|---|---|
+| NAIP, 120 m, clouds included at every height | 3.5 / 8.0 / 0.8 m, 86% | 3.2 / 9.9 / 0.7 m, 78% | 20 km / 71 km / 79 km, 14% |
+| NAIP, 120 m, only shadows | 3.5 / 7.9 / 0.8 m, 86% | 3.3 / 9.1 / 0.7 m, 84% | 3.4 / 7.2 / 0.8 m, 87% |
+| NAIP, 800 m, automatic | 11 / 30 / 1.1 m, 94% | 11 / 30 / 1.0 m, 94% | 2.5 km / 38 km / 44 km, 40% |
+| Sentinel-2, 800 m, automatic | 15 / 39 / 10 m, 82% | 15 / 40 / 10 m, 80% | 800 m / 4.6 km / 5.3 km, 36% |
+
+* Shadows do not matter. Partial cloud costs some fixes and no accuracy.
+* With no ground to see, the numbers show how far dead reckoning wanders on an IMU if
+  nothing stops it, not what a flight would do: the EKF failsafe would land it as soon
+  as visnav stopped reporting a position, which the built-in simulator does not model.
+  Included at 120 m, 4 of 6 overcast flights never found their way back in the 30 minutes
+  allowed. At 800 m all but one got home, or near it, by seeing the ground below 750 m.
+* One of the overcast passes was winter snow called cloud by the scene classification,
+  in the imagery as ground: flights over it had no trouble, and it is in those averages.
+* The 66 flights hit hardest were flown after adding the tilt limit (`max_tilt_deg`),
+  without which a lost vehicle reached thousands of metres per second. The others were
+  not. Of six normal flights flown both ways, medians and fixes did not change.
 
 ## Matcher benchmark (`bench/`)
 
