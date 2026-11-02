@@ -19,6 +19,11 @@
       </div>
     </section>
 
+    <section>
+      <h2 title="Every area with imagery on disk, with the most recently downloaded first: the map opens there. Touching cells make one area. A number after the imagery is how many of the area's cells have it.">Cached imagery <small>click to go there</small></h2>
+      <ul id="regions"></ul>
+    </section>
+
     <section class="grid">
       <label title="Height above the first waypoint for every waypoint without its own altitude. Higher sees more ground, which makes map matching more reliable: with a 90 degree lens it only starts at about 60 m. The planner warns above 122 m (400 ft), the US Part 107 limit.">Cruise alt (m AGL) <input id="default_alt" type="number" value="120" min="5"></label>
       <label title="Height to climb to straight above the first waypoint before flying the route, in metres. Below about 60 m (with a 90 degree lens) the vehicle navigates on visual odometry alone, not the map.">Takeoff alt (m) <input id="takeoff_alt" type="number" value="30" min="5"></label>

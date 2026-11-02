@@ -22,7 +22,9 @@ pip install -e ../onboard --no-deps      # for the Simulate panel
 uvicorn planner.app:app --port 8347      # open http://localhost:8347
 ```
 
-Hover over any field for what it means.
+Hover over any field for what it means. The map opens where imagery was last
+downloaded, and **Cached imagery** lists every area on disk: one entry per group of
+touching cells, saying whether it has NAIP, Sentinel-2 or both. Click one to go there.
 
 1. Click the map to add waypoints (drag to move, set per-waypoint altitude if needed).
 2. **Cache for route** downloads every 0.01 degree cell (about 1 km) that the
@@ -296,6 +298,8 @@ pytest tests
   and date has its own cache, tiles and bundles, that a coarse map only matches from
   high enough, how clouds follow altitude, and flies a Sentinel-2 map with a camera
   seeing NAIP and under clouds.
+* `test_regions.py` checks how cached cells group into regions, which imagery each
+  reports, and that the newest comes first.
 * `test_naip.py` checks cached cells land exactly on the UTM grid, including
   when read from a COG overview.
 * `test_odometry.py` checks odometry against known moves from 2 to 120 m, the

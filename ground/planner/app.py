@@ -317,6 +317,12 @@ def cached_cells(imagery: Imagery = "naip", date: Date = None):
     return {"type": "FeatureCollection", "features": feats}
 
 
+@app.get("/api/cache/regions")
+def cached_regions(date: Date = None):
+    """Where any imagery is cached, the most recently downloaded first."""
+    return library.regions(date)
+
+
 # Simulation -----------------------------------------------------------------
 def _run_dir(run_id: str) -> Path:
     d = sim_runs.dir(run_id)

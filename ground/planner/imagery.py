@@ -27,6 +27,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ from rasterio.windows import Window, from_bounds
 log = logging.getLogger(__name__)
 
 CELL_DEG = 0.01
+CACHED_CELL = re.compile(r"(-?\d+)_(-?\d+)\.tif")  # not the temporary name a cell has while being written
 PC_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 
 # GDAL settings that make windowed COG reads over HTTP efficient.
@@ -100,6 +102,21 @@ class Cell:
 def cells_for_bbox(west: float, south: float, east: float, north: float) -> list[Cell]:
     a, b = Cell.containing(south, west), Cell.containing(north, east)
     return [Cell(iy, ix) for iy in range(a.iy, b.iy + 1) for ix in range(a.ix, b.ix + 1)]
+
+
+def neighbouring_groups(cells: Iterable[Cell]) -> list[set[Cell]]:
+    """Splits cells into groups joined by a shared edge or corner."""
+    unseen, groups = set(cells), []
+    while unseen:
+        group, frontier = set(), [unseen.pop()]
+        while frontier:
+            cell = frontier.pop()
+            group.add(cell)
+            around = {Cell(cell.iy + dy, cell.ix + dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1)}
+            frontier.extend(around & unseen)
+            unseen -= around
+        groups.append(group)
+    return groups
 
 
 @dataclass
@@ -529,3 +546,43 @@ class Library:
                 else:
                     out["clear"].append(d.name.rsplit("_asof", 1)[1] if "_asof" in d.name else "newest")
         return out
+
+    def regions(self, as_of: str | None = None) -> list[dict]:
+        """Groups of neighbouring cached cells of any imagery, the most recently downloaded first.
+
+        Args:
+            as_of: the date of the Sentinel-2 imagery the map shows, if not the newest.
+
+        Returns:
+            For each group: bbox (west, south, east, north), center (lat, lon of the cell
+            nearest the middle, as a bent route may have nothing at the middle itself), cells,
+            downloaded (time of its newest file), and for each of naip and sentinel2 how many
+            of its cells have any of that imagery (cells) and how many have what the map
+            shows (on_map), rather than only another year, date or a single pass.
+        """
+        shown = {"naip": self.default_naip.dir, "sentinel2": self.clear(as_of).dir}
+        found, on_map, newest = {k: set() for k in shown}, {k: set() for k in shown}, {}
+        for imagery, shown_dir in shown.items():
+            for path in (self.data / imagery).glob("gsd_*/*.tif"):
+                key = CACHED_CELL.fullmatch(path.name)
+                if not key:
+                    continue
+                cell = Cell(int(key[1]), int(key[2]))
+                found[imagery].add(cell)
+                if path.parent == shown_dir:
+                    on_map[imagery].add(cell)
+                newest[cell] = max(newest.get(cell, 0.0), path.stat().st_mtime)
+        regions = []
+        for group in neighbouring_groups(newest):
+            south, north = min(c.iy for c in group), max(c.iy for c in group) + 1
+            west, east = min(c.ix for c in group), max(c.ix for c in group) + 1
+            middle = min(group, key=lambda c: (2 * c.iy + 1 - south - north) ** 2 + (2 * c.ix + 1 - west - east) ** 2)
+            w, s, e, n = middle.bbox
+            regions.append({
+                "bbox": [round(v * CELL_DEG, 2) for v in (west, south, east, north)],
+                "center": [round((s + n) / 2, 3), round((w + e) / 2, 3)],
+                "cells": len(group),
+                "downloaded": max(newest[c] for c in group),
+                **{k: {"cells": len(found[k] & group), "on_map": len(on_map[k] & group)} for k in shown},
+            })
+        return sorted(regions, key=lambda r: r["downloaded"], reverse=True)

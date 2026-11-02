@@ -2,13 +2,14 @@
 const $ = (id) => document.getElementById(id);
 const FIELDS = ["default_alt", "takeoff_alt", "speed", "corridor_m"];
 
-const map = L.map("map").setView([39.74, -104.99], 13);
+const map = L.map("map");  // placed once the cached regions are known
 const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
 }).addTo(map);
 const esri = L.tileLayer(
   "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
   { maxZoom: 19, attribution: "Esri World Imagery (display only)" });
+const IMAGERY_MIN_ZOOM = 12;
 const IMAGERY = {
   naip: { label: "NAIP", maxNativeZoom: 18, attribution: "USDA NAIP (cached)" },
   sentinel2: { label: "Sentinel-2", maxNativeZoom: 16, attribution: "Copernicus Sentinel-2 (cached)" },
@@ -17,7 +18,7 @@ const planDate = () => ($("imagery").value === "sentinel2" && $("imagery_date").
 const dateQuery = (name) => (name === "sentinel2" && planDate() ? `&date=${planDate()}` : "");
 const imageryUrl = (name, v) => `/api/tiles/{z}/{x}/{y}.png?imagery=${name}${dateQuery(name)}&v=${v}`;
 const imageryLayers = Object.fromEntries(Object.entries(IMAGERY).map(([name, i]) => [name,
-  L.tileLayer(imageryUrl(name, 0), { minZoom: 12, maxZoom: 20, maxNativeZoom: i.maxNativeZoom, attribution: i.attribution })]));
+  L.tileLayer(imageryUrl(name, 0), { minZoom: IMAGERY_MIN_ZOOM, maxZoom: 20, maxNativeZoom: i.maxNativeZoom, attribution: i.attribution })]));
 const cellsLayer = L.geoJSON(null, { style: { color: "#888", weight: 1, fill: false, dashArray: "2 3" } });
 L.control.layers({ "OpenStreetMap": osm, "Esri imagery": esri }, { "Cache cells": cellsLayer }).addTo(map);
 
@@ -70,6 +71,7 @@ function loadMission(m) {
   $("imagery_date_box").hidden = $("imagery").value !== "sentinel2";
   imageryLayers.sentinel2.setUrl(imageryUrl("sentinel2", 0));
   showImagery($("imagery").value);
+  refreshRegions();
   wps = m.waypoints;
   redraw();
   if (wps.length) map.fitBounds(route.getBounds().pad(0.3));
@@ -113,6 +115,7 @@ function planImageryChanged() {
   $("imagery_date_box").hidden = $("imagery").value !== "sentinel2";
   imageryLayers.sentinel2.setUrl(imageryUrl("sentinel2", 0));
   showImagery($("imagery").value);
+  refreshRegions();
   check();
 }
 $("imagery").onchange = planImageryChanged;
@@ -227,6 +230,7 @@ $("cache").onclick = async () => {
     $("ptext").textContent = notes.length ? notes.join("; ")
       : job.total ? `Downloaded ${job.total} new, ${kept} already cached` : `All ${kept} cells already cached`;
     refreshCells();
+    refreshRegions();
     check();
     refreshPasses(true);
   } catch (e) { alert(e.message); }
@@ -273,6 +277,52 @@ async function refreshSaved() {
 async function refreshCells() {
   cellsLayer.clearLayers();
   if (shownImagery) cellsLayer.addData(await (await api(`/api/cache/cells?imagery=${shownImagery}${dateQuery(shownImagery)}`)).json());
+}
+
+function regionTag(region, name) {
+  const { cells, on_map } = region[name], { label } = IMAGERY[name];
+  const count = cells < region.cells ? ` ${cells}/${region.cells}` : "";
+  if (on_map) return `<span class="tag">${label}${count}</span>`;
+  const why = `Downloaded for simulated flights or for another date, so the map's ${label} button shows nothing here.`;
+  return `<span class="tag off" title="${why}">${label}${count}, not on map</span>`;
+}
+
+// Lists the regions with cached imagery and returns them, or none if that fails.
+async function refreshRegions() {
+  const list = $("regions");
+  let regions;
+  try {
+    regions = await (await api(`/api/cache/regions?${dateQuery("sentinel2")}`)).json();
+  } catch (e) {
+    list.innerHTML = `<li class="hint">Could not list cached imagery: ${e.message}</li>`;
+    return [];
+  }
+  list.innerHTML = regions.length ? "" : `<li class="hint">Nothing downloaded yet.</li>`;
+  const km = (a, b) => Math.max(1, Math.round(L.latLng(a).distanceTo(b) / 1000));
+  regions.forEach((region) => {
+    const [w, s, e, n] = region.bbox;
+    const li = list.appendChild(document.createElement("li"));
+    const b = li.appendChild(document.createElement("button"));
+    b.className = "region";
+    b.innerHTML = `<span>${region.center[0].toFixed(3)}, ${region.center[1].toFixed(3)}</span>
+      <small>${region.cells} cell${region.cells === 1 ? "" : "s"}, ${km([s, w], [s, e])} × ${km([s, w], [n, w])} km,
+      ${new Date(region.downloaded * 1000).toLocaleDateString()}</small>
+      <div>${Object.keys(IMAGERY).filter((name) => region[name].cells).map((name) => regionTag(region, name)).join(" ")}</div>`;
+    b.onclick = () => goToRegion(region);
+  });
+  return regions;
+}
+
+function goToRegion(region) {
+  showView("plan");
+  const [w, s, e, n] = region.bbox, bounds = L.latLngBounds([s, w], [n, e]).pad(0.1);
+  // Cached imagery is not drawn when zoomed out further, so a very long region only shows around its middle.
+  if (map.getBoundsZoom(bounds) < IMAGERY_MIN_ZOOM) map.setView(region.center, IMAGERY_MIN_ZOOM);
+  else map.fitBounds(bounds);
+  if (shownImagery && !region[shownImagery].on_map) {
+    const other = Object.keys(IMAGERY).find((name) => region[name].on_map);
+    if (other) showImagery(other);
+  }
 }
 
 // Simulation: runs execute on the server, the 3D viewer of each is shown in an iframe.
@@ -477,7 +527,10 @@ async function pollRun() {
   if (id !== openRun) return;
   renderRun(run);
   if (ACTIVE.includes(run.state)) simTimer = setTimeout(pollRun, 1000);
-  else refreshRuns();
+  else {
+    refreshRuns();
+    refreshRegions();
+  }
 }
 
 function clock(t) { return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`; }
@@ -597,6 +650,9 @@ async function refreshRuns() {
   $("sim_missing").hidden = simulator;
   refreshSaved();
   showImagery($("imagery").value);
+  const [last] = await refreshRegions();
+  if (last) goToRegion(last);
+  else map.setView([39.74, -104.99], 13);
   check();
   if (simulator) {
     const running = (await refreshRuns()).find((r) => ACTIVE.includes(r.state));

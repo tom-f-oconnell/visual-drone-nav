@@ -38,6 +38,13 @@ ol#wps .wp { display: flex; gap: 4px; align-items: center; font-size: 12px; }
 ol#wps .wp span { flex: 1; font-variant-numeric: tabular-nums; }
 ol#wps .wp input { width: 64px; padding: 2px 4px; }
 ol#wps .wp button { padding: 1px 6px; }
+#regions { list-style: none; padding: 0; margin: 0; max-height: 190px; overflow-y: auto; }
+#regions li { margin-bottom: 4px; }
+.region { display: block; width: 100%; padding: 3px 7px; font-size: 12px; text-align: left; font-variant-numeric: tabular-nums; }
+.region:hover { border-color: var(--accent); }
+.region small { color: var(--muted); }
+.tag { display: inline-block; margin-top: 2px; padding: 0 5px; font-size: 11px; border: 1px solid transparent; border-radius: 3px; background: #cfe0fb; }
+.tag.off { background: none; border: 1px dashed var(--line); color: var(--muted); }
 #stats { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 #warnings { padding-left: 18px; color: var(--warn); font-size: 12px; }
 .progress { position: relative; height: 22px; border: 1px solid var(--line); border-radius: 4px; margin-bottom: 6px; overflow: hidden; }
