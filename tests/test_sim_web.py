@@ -246,6 +246,8 @@ def test_refusals(client):
     assert client.post("/api/sim/runs", json={"mission": far}).status_code == 409
     for options in ({"wind_speed": -1}, {"navigation": "nonsense"}, {"compass_bias_deg": 90}):
         assert client.post("/api/sim/runs", json={"mission": mission(), "options": options}).status_code == 422
+    problem = client.post("/api/sim/runs", json={"mission": mission(), "options": {"wind_speed": -1}}).json()["detail"][0]
+    assert problem["loc"] == ["body", "options", "wind_speed"] and problem["msg"]  # what the page's errorText shows
     for fog in ({"visibility": 1}, {"nonsense": 1}):
         r = client.post("/api/sim/runs", json={"mission": mission(), "options": {"fog": fog}})
         assert r.status_code == 422 and "fog" in r.json()["detail"], r.text

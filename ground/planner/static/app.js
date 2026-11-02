@@ -118,9 +118,15 @@ function planImageryChanged() {
 $("imagery").onchange = planImageryChanged;
 $("imagery_date").onchange = planImageryChanged;
 
+// A request that fails validation gets a list of problems, each located by "body" and then the path to the field.
+function errorText(detail) {
+  if (!Array.isArray(detail)) return detail;
+  return detail.map((d) => [d.loc.slice(1).join("."), d.msg].filter(Boolean).join(": ")).join("\n");
+}
+
 async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  if (!r.ok) throw new Error(errorText((await r.json().catch(() => ({}))).detail) || r.statusText);
   return r;
 }
 
