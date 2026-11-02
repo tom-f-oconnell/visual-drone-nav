@@ -143,7 +143,15 @@ def orthorectify(img: np.ndarray, cam: CameraModel, roll, pitch, yaw, h: float,
     H = A @ G
     w, hgt = int(math.ceil(size[0])), int(math.ceil(size[1]))
     gray = img if img.ndim == 2 else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    warped = cv2.warpPerspective(gray, H, (w, hgt), flags=cv2.INTER_AREA)
+    # warpPerspective only samples, so shrinking a frame a lot (a coarse map, or high up) would alias it.
+    d1, d2 = pts[:, 2] - pts[:, 0], pts[:, 3] - pts[:, 1]
+    area = abs(d1[0] * d2[1] - d1[1] * d2[0]) / 2
+    shrink = int(math.sqrt(cam.width * cam.height / max(area, 1.0)) / 2)
+    if shrink > 1:
+        small = cv2.resize(gray, None, fx=1 / shrink, fy=1 / shrink, interpolation=cv2.INTER_AREA)
+        warped = cv2.warpPerspective(small, H @ np.diag([shrink, shrink, 1.0]), (w, hgt), flags=cv2.INTER_LINEAR)
+    else:
+        warped = cv2.warpPerspective(gray, H, (w, hgt), flags=cv2.INTER_AREA)
     mask = cv2.warpPerspective(np.full(gray.shape, 255, np.uint8), H, (w, hgt), flags=cv2.INTER_NEAREST) > 0
     mask = cv2.erode(mask.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
     return Ortho(warped, mask, (-lo[0], -lo[1]), H)

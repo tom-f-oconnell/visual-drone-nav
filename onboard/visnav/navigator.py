@@ -4,7 +4,7 @@ The filter starts at the known start position (the vehicle is placed at the
 mission home), so there is a position to report, and the autopilot can arm,
 before any map fix. On the ground it is held still; in the air, frame-to-frame
 odometry carries it through takeoff, landing and gaps between map fixes; above
-min_map_alt, matches against the NAIP map correct the accumulated drift. With no
+min_map_alt, matches against the reference map correct the accumulated drift. With no
 matcher it runs on odometry alone, and the map's pixels are never looked at.
 """
 
@@ -64,13 +64,14 @@ class Navigator:
         self.map, self.cam, self.matcher = map_, cam, matcher
         self.start = (start_lat, start_lon)
         self.start_sigma = start_sigma_m
-        self.max_search_m, self.min_search_m = max_search_m, min_search_m
+        # Too few map pixels in a small search on a coarse map to tell a peak from chance.
+        self.max_search_m, self.min_search_m = max(max_search_m, 40 * map_.gsd), max(min_search_m, 10 * map_.gsd)
         self.min_map_alt, self.ground_alt = min_map_alt, ground_alt
         self.accel_sigma = accel_sigma
         self.odometry_drift = odometry_drift
         self.odometry_dist = 0.0  # m flown since the last map fix
         self.odometry = odometry or FrameOdometry(cam)
-        self.kf = PositionFilter(accel_sigma)
+        self.kf = PositionFilter(accel_sigma, fix_bias_m=max(3.0, map_.gsd))
         self.yaw_corr = 0.0  # rad added to the autopilot's yaw, learnt from map fixes (compass bias)
         self.last_fix_t: float | None = None
         self.last_update_t: float | None = None

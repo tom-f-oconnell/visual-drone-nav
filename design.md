@@ -208,6 +208,58 @@ Median error / error at the end, then the end error as a share of distance flown
   camera, so a wide enough corridor matters when comparing. The comparison counts
   them.
 
+## Sentinel-2 as the map
+
+Sentinel-2 is worldwide, free and weeks old where NAIP is US-only and years old, at
+10 m per pixel against 0.6 m. What decides whether it can be matched is how many map
+pixels a frame covers, so `CorrMatcher` works in coarse pixels of at least 2.4 m, not
+metres. Frames rendered from NAIP (a different sensor, 2 to 4 years older) against
+Sentinel-2 from October 2026, over suburbs, farmland and foothills, with 1° attitude,
+3° heading and 1% height errors and a 90° lens, 720 frames per height:
+
+| height | frame, map pixels | got a fix, truth in the search | median fix error | false fixes, truth 1 km away |
+|---|---|---|---|---|
+| 120 m | 24 x 15 | 0% | | 0 |
+| 200 m | 40 x 25 | 12% | 10 m | 0 |
+| 250 m | 50 x 31 | 88% | 10 m | 0 |
+| 300 m | 60 x 38 | 93% | 10 m | 0 |
+| 400 m | 80 x 50 | 98% | 12 m | 0 |
+| 500 m | 100 x 63 | 98% | 14 m | 1 |
+
+Closed-loop `sim3d` flights of 2.5 km, the same three sites, two seeds each, with a
+2° compass bias and the camera seeing NAIP. "Fixes" counts all frames above 25 m, so
+it includes the climb and descent, below where a coarse map can match:
+
+| map, height | median | p95 | error at the end | fixes |
+|---|---|---|---|---|
+| NAIP, 120 m | 3.5 m | 6.7 m | 0.7 m | 88% |
+| Sentinel-2, 120 m | 65 m | 237 m | 262 m | 0% |
+| Sentinel-2, 200 m | 10.5 m | 27 m | 7 m | 46% |
+| Sentinel-2, 300 m | 9.8 m | 26 m | 6 m | 57% |
+| Sentinel-2, 500 m | 11.5 m | 29 m | 6 m | 69% |
+| none (odometry only), 120 m | 38 m | | 59 m | 0% |
+
+* At 120 m a Sentinel-2 plan is worse than the odometry-only comparison. With no fixes
+  its reported uncertainty passes `lost_sigma` (60 m) after about 1.2 km, visnav stops
+  reporting a position, and the autopilot falls back on its IMU. On a real flight the
+  EKF failsafe would land it. Odometry-only mode is told to keep trusting odometry
+  because it exists to measure it. So the planner warns below a 600 m footprint.
+* From 200 m up it holds about 10 m with no growth over distance, and removes a
+  lasting compass error as NAIP does, though about three times less accurately.
+* Those heights are over the 122 m Part 107 limit, so this needs a waiver or another
+  jurisdiction. The rangefinder in `docs/ardupilot_visnav.parm` will not reach them
+  either, so height would come from the barometer, with the terrain error that brings.
+  Neither is modelled, and this has not been flown in SITL.
+* On a coarse map chance peaks score up to about 2.8, so fixes need 3.0 rather than
+  2.6. Maps are matched with no finer stage, and frames shrunk by a factor of 4 or
+  more are downsampled first, as `warpPerspective` alone would alias them.
+* Each cell uses the newest of up to 16 passes under 20% cloud, with the scene
+  classification (SCL) keeping cloud, shadow and snow out, filled from older passes. If
+  all of them are cloudy over a pixel the newest is used, as a hole in the map is
+  worse. Cells stay as first downloaded; delete `data/sentinel2/` to refresh them.
+* A cell takes about 0.03 MB against about 5 MB for NAIP, and a 20-cell route about
+  17 s against 50 s to download.
+
 ## Matcher benchmark (`bench/`)
 
 Twelve US sites (foothills, farm/suburb, Iowa row crops, Kansas pivots, Texas
@@ -242,6 +294,7 @@ fixes.
 
 * Farmland needs multi-frame matching or route planning around it.
 * Correlation does not fit scale, so height errors over a few percent cost fixes.
+* Sentinel-2 maps only match from about 200 m up, see above.
 * The heading estimate from correlation under-reads (about 0.4 of the true error
   between template rotations), so the correction converges slowly.
 * Flat-terrain assumption: hilly areas need the rangefinder or a DEM

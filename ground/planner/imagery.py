@@ -1,19 +1,22 @@
-"""NAIP download and on-disk cache.
+"""Aerial and satellite imagery download and on-disk cache.
 
 Imagery is cached on a fixed grid of 0.01 x 0.01 degree cells (about 1.1 km x
 0.85 km at mid US latitudes). Each cell is stored once as an RGB GeoTIFF in
 the UTM zone of its centre, at a fixed ground sample distance, so cells are
 reused by every mission that touches them.
 
-Two imagery sources are supported:
+Three imagery sources are supported:
 
-* ``StacSource``: Microsoft Planetary Computer STAC API (default). The COGs
-  are read with windowed HTTP range requests, so only the pixels covering a
-  cell are downloaded, never the whole 7.5 minute quarter quad. Scenes finer
-  than the cache GSD (e.g. 0.3 m NAIP from 2022 on) are read from a COG
+* ``StacSource``: NAIP from the Microsoft Planetary Computer STAC API (default).
+  The COGs are read with windowed HTTP range requests, so only the pixels
+  covering a cell are downloaded, never the whole 7.5 minute quarter quad. Scenes
+  finer than the cache GSD (e.g. 0.3 m NAIP from 2022 on) are read from a COG
   overview, so they cost no more than 0.6 m scenes.
-* ``LocalSource``: a directory of NAIP GeoTIFFs you downloaded yourself (for
-  example from USGS EarthExplorer), useful offline or on an air-gapped laptop.
+* ``Sentinel2Source``: Sentinel-2 true colour from the same API, worldwide at
+  10 m, read the same way. Newest clear scenes first, with each scene's cloud
+  classification keeping clouds out of the cell.
+* ``LocalSource``: a directory of GeoTIFFs you downloaded yourself (for example
+  NAIP from USGS EarthExplorer), useful offline or on an air-gapped laptop.
 """
 
 from __future__ import annotations
@@ -102,6 +105,8 @@ class SceneRef:
     href: str
     year: int
     id: str = ""
+    date: str = ""
+    mask_href: str = ""  # Sentinel-2 scene classification, to keep clouds out
 
 
 class Source(Protocol):
@@ -148,8 +153,31 @@ class StacSource:
         return out
 
 
+class Sentinel2Source(StacSource):
+    """Sentinel-2 L2A true colour from a STAC API, newest scenes first.
+
+    Args:
+        url: STAC API.
+        max_cloud: scenes cloudier than this percentage are not used.
+        max_scenes: how many scenes to look through for each cell. Sentinel-2
+            passes every few days, so this reaches back a few months.
+    """
+
+    name = "sentinel-2"
+
+    def __init__(self, url: str = PC_STAC_URL, max_cloud: float = 20.0, max_scenes: int = 16):
+        super().__init__(url, collection="sentinel-2-l2a", asset="visual")
+        self.max_cloud, self.max_scenes = max_cloud, max_scenes
+
+    def scenes(self, bbox):
+        search = self._open().search(collections=[self.collection], bbox=list(bbox), max_items=self.max_scenes,
+                                     query={"eo:cloud_cover": {"lt": self.max_cloud}}, sortby="-properties.datetime")
+        return [SceneRef(item.assets[self.asset].href, item.datetime.year, item.id, item.datetime.date().isoformat(),
+                         item.assets["SCL"].href) for item in search.items()]
+
+
 class LocalSource:
-    """NAIP GeoTIFFs in a local directory (searched recursively)."""
+    """GeoTIFFs in a local directory (searched recursively)."""
 
     name = "local"
 
@@ -221,7 +249,29 @@ def read_scene(href: str, crs: str, transform, width: int, height: int) -> np.nd
     return out
 
 
-class NaipCache:
+# Sentinel-2 scene classes not to use: no data, defective, cloud shadow, clouds, thin cirrus, snow.
+S2_UNCLEAR = (0, 1, 3, 8, 9, 10, 11)
+
+
+def read_clear(href: str, crs: str, transform, width: int, height: int) -> np.ndarray:
+    """Pixels of a grid that a Sentinel-2 scene classification (SCL) calls clear."""
+    with rasterio.open(href) as src:
+        bounds = transform_bounds(crs, src.crs, *array_bounds(height, width, transform), densify_pts=21)
+        win = from_bounds(*bounds, src.transform)
+        win = Window(math.floor(win.col_off) - 1, math.floor(win.row_off) - 1, math.ceil(win.width) + 2, math.ceil(win.height) + 2)
+        try:
+            win = win.intersection(Window(0, 0, src.width, src.height))
+        except WindowError:
+            return np.zeros((height, width), bool)
+        data = src.read(1, window=win)
+        src_transform, src_crs = src.window_transform(win), src.crs
+    out = np.zeros((height, width), np.uint8)
+    reproject(data, out, src_transform=src_transform, src_crs=src_crs, dst_transform=transform, dst_crs=crs,
+              resampling=Resampling.nearest)
+    return ~np.isin(out, S2_UNCLEAR)
+
+
+class CellCache:
     """Cell cache on disk: <root>/gsd_<gsd>[_y<years>]/<key>.tif plus a JSON sidecar.
 
     Sources limited to some NAIP years get their own directory, so changing
@@ -255,7 +305,7 @@ class NaipCache:
         crs, transform, width, height = cell.grid(self.gsd)
         rgb = np.zeros((3, height, width), np.uint8)
         filled = np.zeros((height, width), bool)
-        used = []
+        used, first = [], None
         with rasterio.Env(**GDAL_ENV):
             for scene in self.source.scenes(cell.bbox):
                 if filled.all():
@@ -267,12 +317,24 @@ class NaipCache:
                     continue
                 if data is None:
                     continue
+                first = (scene, data) if first is None and data.any() else first
                 valid = data.any(axis=0) & ~filled
+                if scene.mask_href:
+                    valid &= read_clear(scene.mask_href, crs, transform, width, height)
                 if not valid.any():
                     continue
                 rgb[:, valid] = data[:, valid]
                 filled |= valid
-                used.append({"id": scene.id, "year": scene.year})
+                used.append({"id": scene.id, "year": scene.year, "date": scene.date})
+            # Clouds or snow in every scene looked at: better seen than a hole in the map.
+            if first is not None and not filled.all():
+                scene, data = first
+                valid = data.any(axis=0) & ~filled
+                if valid.any():
+                    rgb[:, valid] = data[:, valid]
+                    filled |= valid
+                    if scene.id not in {u["id"] for u in used}:
+                        used.append({"id": scene.id, "year": scene.year, "date": scene.date})
         if not used:
             return None
         tmp = dst.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp.tif")

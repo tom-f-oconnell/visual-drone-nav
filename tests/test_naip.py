@@ -7,7 +7,7 @@ import rasterio
 from rasterio.enums import Resampling
 from rasterio.transform import from_origin
 
-from planner.naip import Cell, LocalSource, NaipCache, StacSource
+from planner.imagery import Cell, LocalSource, CellCache, StacSource
 
 
 def checker(xs, ys):
@@ -36,7 +36,7 @@ def test_fine_scene_read_from_overview_and_aligned(tmp_path):
         dst.write(rgb)
         dst.build_overviews([2, 4], Resampling.nearest)
 
-    cache = NaipCache(tmp_path / "cache", LocalSource(tmp_path / "src"), gsd=0.6)
+    cache = CellCache(tmp_path / "cache", LocalSource(tmp_path / "src"), gsd=0.6)
     with rasterio.open(cache.fetch(cell)) as src:
         got = src.read()
     gx, gy = l + 0.6 * (np.arange(width) + 0.5), t - 0.6 * (np.arange(height) + 0.5)
@@ -46,5 +46,5 @@ def test_fine_scene_read_from_overview_and_aligned(tmp_path):
 
 
 def test_cache_dir_keyed_by_years(tmp_path):
-    assert NaipCache(tmp_path, StacSource(), 0.6).dir.name == "gsd_0.60"
-    assert NaipCache(tmp_path, StacSource(years=[2023, 2021]), 0.6).dir.name == "gsd_0.60_y2021-2023"
+    assert CellCache(tmp_path, StacSource(), 0.6).dir.name == "gsd_0.60"
+    assert CellCache(tmp_path, StacSource(years=[2023, 2021]), 0.6).dir.name == "gsd_0.60_y2021-2023"

@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from planner.mission import Camera, Mission, build_bundle, build_map
-from planner.naip import NaipCache, StacSource
+from planner.imagery import CellCache, StacSource
 
 from sites import BY_NAME, SITES, Site
 
@@ -35,7 +35,7 @@ def mission_for(site: Site, corridor_m: float) -> Mission:
     )
 
 
-def fetch(mission: Mission, cache: NaipCache, threads: int) -> list[dict]:
+def fetch(mission: Mission, cache: CellCache, threads: int) -> list[dict]:
     cells = mission.required_cells()
     with ThreadPoolExecutor(threads) as ex:
         list(ex.map(cache.fetch, cells))
@@ -53,8 +53,8 @@ def scenes_of(metas: list[dict]) -> list[dict]:
 def build_site(site: Site, data: Path, threads: int = 6):
     out = data / site.name
     out.mkdir(parents=True, exist_ok=True)
-    map_cache = NaipCache(data / "naip", StacSource(years=[site.map_year]), MAP_GSD)
-    world_cache = NaipCache(data / "naip", StacSource(years=[site.world_year]), site.world_gsd)
+    map_cache = CellCache(data / "naip", StacSource(years=[site.map_year]), MAP_GSD)
+    world_cache = CellCache(data / "naip", StacSource(years=[site.world_year]), site.world_gsd)
 
     m = mission_for(site, MAP_CORRIDOR_M)
     map_cells = fetch(m, map_cache, threads)

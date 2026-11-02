@@ -340,7 +340,7 @@ def main(argv=None):
         sp.add_argument("--matcher", default="corr",
                         help='"corr", "orb", "akaze", "sift", or several joined by "+" to try in that order; '
                              'in the simulators, "none" for odometry alone, never looking at the map\'s imagery')
-        sp.add_argument("--min-score", type=float, default=2.6, help="correlation score required of a fix")
+        sp.add_argument("--min-score", type=float, help="correlation score required of a fix (default: 2.6, on Sentinel-2 3.0)")
         sp.add_argument("--nfeatures", type=int, default=3000)
         sp.add_argument("--min-inliers", type=int, default=20, help="RANSAC inliers required of a feature fix")
         sp.add_argument("--start-sigma", type=float, default=5.0,

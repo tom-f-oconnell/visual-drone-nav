@@ -5,8 +5,8 @@ A mission bundle is what gets copied to the Jetson. It contains
 * ``mission.waypoints``  QGC WPL 110 mission, loadable by Mission Planner,
   QGroundControl, MAVProxy or ``visnav-upload``.
 * ``mission.json``       waypoints, camera assumptions and map metadata.
-* ``map.tif``            NAIP mosaic of the route corridor in one UTM zone,
-                         pixels outside the corridor set to 0 (nodata).
+* ``map.tif``            NAIP or Sentinel-2 mosaic of the route corridor in one
+                         UTM zone, pixels outside the corridor set to 0 (nodata).
 """
 
 from __future__ import annotations
@@ -28,7 +28,9 @@ from rasterio.transform import from_origin
 from rasterio.vrt import WarpedVRT
 from shapely.geometry import LineString, Point, mapping
 
-from .naip import Cell, NaipCache, cells_for_bbox, utm_epsg
+from typing import Literal
+
+from .imagery import Cell, CellCache, cells_for_bbox, utm_epsg
 
 # MAVLink command ids used in the exported mission.
 MAV_CMD_NAV_WAYPOINT = 16
@@ -62,7 +64,8 @@ class Mission(BaseModel):
     takeoff_alt: float = Field(30.0, gt=0)
     speed: float = Field(10.0, gt=0, description="m/s")
     end_action: str = Field("rtl", pattern="^(rtl|land|none)$")
-    corridor_m: float = Field(400.0, gt=0, description="NAIP half-width around the route")
+    corridor_m: float = Field(400.0, gt=0, description="imagery half-width around the route")
+    imagery: Literal["naip", "sentinel2"] = Field("naip", description="what the map the vehicle navigates by is made from")
     camera: Camera = Field(default_factory=Camera)
 
     @field_validator("name")
@@ -113,12 +116,15 @@ class Mission(BaseModel):
         if len(self.waypoints) < 2:
             out.append("Add at least two waypoints.")
             return out
+        # 60 pixels at the matcher's working scale of at least 2.4 m. Measured on real imagery, see design.md.
+        needed = 60 * max(gsd, 2.4)
         for i, wp in enumerate(self.waypoints):
             fp = self.footprint_m(self.alt_of(wp))
-            if fp / gsd < 250:
+            if round(fp) < needed:
                 out.append(
-                    f"WP{i + 1}: camera footprint {fp:.0f} m is only {fp / gsd:.0f} map pixels wide; "
-                    "matching needs roughly 250+ (fly higher or use a wider lens)."
+                    f"WP{i + 1}: camera footprint {fp:.0f} m is too small to match against this map's "
+                    f"{gsd:g} m pixels; it needs about {needed:.0f} m (fly higher or use a wider lens). "
+                    "Without map fixes the flight runs on odometry alone, and drifts."
                 )
             if self.alt_of(wp) > 122:
                 out.append(f"WP{i + 1}: {self.alt_of(wp):.0f} m is above the 400 ft (122 m) Part 107 limit.")
@@ -165,7 +171,7 @@ def _cell_box(cell: Cell):
     return box(*cell.bbox)
 
 
-def build_map(mission: Mission, cache: NaipCache, out_path: Path) -> dict:
+def build_map(mission: Mission, cache: CellCache, out_path: Path) -> dict:
     """Mosaic cached cells covering the mission corridor into one UTM GeoTIFF."""
     poly_utm, _ = mission.corridor()
     gsd = cache.gsd
@@ -208,7 +214,7 @@ def build_map(mission: Mission, cache: NaipCache, out_path: Path) -> dict:
     }
 
 
-def write_bundle(mission: Mission, cache: NaipCache, workdir: Path):
+def write_bundle(mission: Mission, cache: CellCache, workdir: Path):
     """Write the bundle files into workdir."""
     workdir.mkdir(parents=True, exist_ok=True)
     map_meta = build_map(mission, cache, workdir / "map.tif")
@@ -227,7 +233,7 @@ def write_bundle(mission: Mission, cache: NaipCache, workdir: Path):
     (workdir / "mission.json").write_text(json.dumps(meta, indent=2))
 
 
-def build_bundle(mission: Mission, cache: NaipCache, workdir: Path) -> bytes:
+def build_bundle(mission: Mission, cache: CellCache, workdir: Path) -> bytes:
     """Write the bundle files into workdir and return them zipped."""
     write_bundle(mission, cache, workdir)
     buf = io.BytesIO()

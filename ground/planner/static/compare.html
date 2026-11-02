@@ -280,7 +280,8 @@ function drawTable() {
 function drawText() {
   const o = runs[0].options;
   const wind = `wind ${o.wind_speed} m/s from ${o.wind_from_deg}°, gusts ${o.gust} m/s, seed ${o.seed}`;
-  const camera = o.world_year ? `camera sees NAIP ${o.world_year}` : "camera sees the map's own imagery";
+  const worldName = o.world_year === "newest" ? "the newest NAIP" : `NAIP ${o.world_year}`;
+  const camera = (runs[0].imagery === "sentinel2" ? "map from Sentinel-2, " : "") + (o.world_year ? `camera sees ${worldName}` : "camera sees the map's own imagery");
   const look = Object.keys(o.appearance || {}).length ? ", camera appearance changed" : "";
   $("conditions").textContent = `Same route and settings for both: ${camera}${look}, ${wind}, compass bias ${o.compass_bias_deg ?? 0}°, height bias ${o.height_bias_pct ?? 0}%.`;
 

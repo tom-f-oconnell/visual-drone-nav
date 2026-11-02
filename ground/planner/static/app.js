@@ -1,4 +1,4 @@
-// NAIP flight planner front end: Leaflet map, waypoint editing, cache + export calls, simulations.
+// Flight planner front end: Leaflet map, waypoint editing, cache + export calls, simulations.
 const $ = (id) => document.getElementById(id);
 const FIELDS = ["default_alt", "takeoff_alt", "speed", "corridor_m"];
 
@@ -9,12 +9,40 @@ const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
 const esri = L.tileLayer(
   "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
   { maxZoom: 19, attribution: "Esri World Imagery (display only)" });
-const naip = L.tileLayer("/api/tiles/{z}/{x}/{y}.png", {
-  minZoom: 12, maxZoom: 20, maxNativeZoom: 18, attribution: "USDA NAIP (cached)",
-}).addTo(map);
+const IMAGERY = {
+  naip: { label: "NAIP", maxNativeZoom: 18, attribution: "USDA NAIP (cached)" },
+  sentinel2: { label: "Sentinel-2", maxNativeZoom: 16, attribution: "Copernicus Sentinel-2 (cached)" },
+};
+const imageryUrl = (name, v) => `/api/tiles/{z}/{x}/{y}.png?imagery=${name}&v=${v}`;
+const imageryLayers = Object.fromEntries(Object.entries(IMAGERY).map(([name, i]) => [name,
+  L.tileLayer(imageryUrl(name, 0), { minZoom: 12, maxZoom: 20, maxNativeZoom: i.maxNativeZoom, attribution: i.attribution })]));
 const cellsLayer = L.geoJSON(null, { style: { color: "#888", weight: 1, fill: false, dashArray: "2 3" } });
-L.control.layers({ "OpenStreetMap": osm, "Esri imagery": esri },
-  { "Cached NAIP": naip, "Cache cells": cellsLayer }).addTo(map);
+L.control.layers({ "OpenStreetMap": osm, "Esri imagery": esri }, { "Cache cells": cellsLayer }).addTo(map);
+
+// Which cached imagery the map shows, separately from which one the plan uses.
+let shownImagery = null;
+const ImageryControl = L.Control.extend({
+  onAdd() {
+    const box = L.DomUtil.create("div", "imagery-view");
+    box.title = "Cached imagery to show on the map. This does not change what the plan uses (Map imagery in the panel).";
+    [["naip", "NAIP"], ["sentinel2", "Sentinel-2"], ["", "Off"]].forEach(([name, label]) => {
+      const b = L.DomUtil.create("button", "", box);
+      b.textContent = label;
+      b.dataset.view = name;
+      b.onclick = () => showImagery(name);
+    });
+    L.DomEvent.disableClickPropagation(box);  // a click here must not add a waypoint
+    return box;
+  },
+});
+map.addControl(new ImageryControl({ position: "bottomleft" }));
+
+function showImagery(name) {
+  Object.entries(imageryLayers).forEach(([k, layer]) => { if (k === name) layer.addTo(map); else layer.remove(); });
+  shownImagery = name;
+  document.querySelectorAll(".imagery-view button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === name)));
+  refreshCells();
+}
 
 const route = L.polyline([], { color: "#1f6feb", weight: 3 }).addTo(map);
 const corridor = L.geoJSON(null, { style: { color: "#1f6feb", weight: 1, fillOpacity: 0.06 } }).addTo(map);
@@ -24,7 +52,7 @@ let wps = [];  // {lat, lon, alt|null, hold_s}
 function mission() {
   const m = {
     name: $("name").value, waypoints: wps, end_action: $("end_action").value,
-    camera: { hfov_deg: +$("hfov_deg").value },
+    camera: { hfov_deg: +$("hfov_deg").value }, imagery: $("imagery").value,
   };
   FIELDS.forEach((f) => (m[f] = +$(f).value));
   return m;
@@ -35,6 +63,8 @@ function loadMission(m) {
   FIELDS.forEach((f) => ($(f).value = m[f]));
   $("end_action").value = m.end_action;
   $("hfov_deg").value = m.camera.hfov_deg;
+  $("imagery").value = m.imagery || "naip";
+  showImagery($("imagery").value);
   wps = m.waypoints;
   redraw();
   if (wps.length) map.fitBounds(route.getBounds().pad(0.3));
@@ -74,6 +104,7 @@ function renderList() {
 map.on("click", (e) => { wps.push({ lat: e.latlng.lat, lon: e.latlng.lng, alt: null, hold_s: 0 }); redraw(); });
 $("clear").onclick = () => { wps = []; redraw(); };
 [...FIELDS, "hfov_deg", "end_action"].forEach((f) => ($(f).onchange = check));
+$("imagery").onchange = () => { showImagery($("imagery").value); check(); };
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
@@ -91,7 +122,7 @@ function check() {
     $("stats").innerHTML = res.length_m === undefined ? "" :
       `Route ${(res.length_m / 1000).toFixed(2)} km, about ${Math.round(res.est_time_s / 60)} min at cruise.<br>
        Camera footprint at cruise: ${res.footprint_m} m wide.<br>
-       NAIP cells: ${res.cached}/${res.cells} cached` +
+       ${IMAGERY[$("imagery").value].label} cells: ${res.cached}/${res.cells} cached` +
       (res.cells > res.cached ? `, about ${res.est_download_mb} MB to fetch.` : ".");
     $("warnings").innerHTML = res.warnings.map((w) => `<li>${w}</li>`).join("");
     routeCached = Boolean(res.cells && res.cached === res.cells);
@@ -102,20 +133,34 @@ function check() {
   }, 250);
 }
 
-// Which NAIP years the route uses. The server may have to ask the imagery source, so only when the route's cells change.
+// What imagery the route uses, and whether NAIP covers it. The server may have to ask the imagery
+// source, so only when the route's cells change.
 let imageryKey = null;
 async function refreshImagery(cached) {
-  const key = `${routeCells}/${cached}`;
+  const plan = $("imagery");
+  $("cache_name").textContent = `Cache ${IMAGERY[plan.value].label} for route`;
+  const key = `${routeCells}/${cached}/${plan.value}`;
   if (key === imageryKey) return;
   imageryKey = key;
   try {
-    const { label } = await (await api("/api/plan/imagery", { method: "POST", body: JSON.stringify(mission()) })).json();
-    if (key === imageryKey) $("naip_years").textContent = label;
+    const { label, naip_here } = await (await api("/api/plan/imagery", { method: "POST", body: JSON.stringify(mission()) })).json();
+    if (key !== imageryKey) return;
+    $("naip_years").textContent = label;
+    plan.options[0].disabled = naip_here === false;
+    plan.options[0].textContent = naip_here === false ? "NAIP (none here)" : "NAIP (0.6 m aerial)";
+    $("imagery_note").hidden = naip_here !== false;
+    $("imagery_note").textContent = "There is no NAIP here, so this plan uses Sentinel-2.";
+    if (naip_here === false && plan.value === "naip") {
+      plan.value = "sentinel2";
+      showImagery("sentinel2");
+      check();
+    }
   } catch (e) { imageryKey = null; console.warn(e); }
 }
 
 $("cache").onclick = async () => {
   $("cache").disabled = true;
+  const name = $("imagery").value, layer = imageryLayers[name];
   try {
     let job = await (await api("/api/cache/jobs", { method: "POST", body: JSON.stringify(mission()) })).json();
     $("progress").hidden = false;
@@ -125,12 +170,14 @@ $("cache").onclick = async () => {
       $("ptext").textContent = `${job.done} / ${job.total} new cells`;
       await new Promise((r) => setTimeout(r, 1000));
       job = await (await api(`/api/cache/jobs/${job.id}`)).json();
-      if (job.done !== shown) naip.setUrl(`/api/tiles/{z}/{x}/{y}.png?v=${job.done}`);
+      if (job.done !== shown) layer.setUrl(imageryUrl(name, job.done));
     }
     $("bar").style.width = "100%";
-    if (job.total) naip.setUrl(`/api/tiles/{z}/{x}/{y}.png?v=${Date.now()}`);
+    if (job.total) layer.setUrl(imageryUrl(name, Date.now()));
     const notes = [];
-    if (job.no_coverage.length) notes.push(`${job.no_coverage.length} cells have no NAIP coverage`);
+    if (job.no_coverage.length) {
+      notes.push(`${job.no_coverage.length} cells have no ${IMAGERY[name].label} coverage` + (name === "naip" ? "; Sentinel-2 may" : ""));
+    }
     if (job.errors.length) notes.push(`${job.errors.length} errors (see server log)`);
     const kept = job.route_cells - job.total;
     $("ptext").textContent = notes.length ? notes.join("; ")
@@ -180,7 +227,7 @@ async function refreshSaved() {
 
 async function refreshCells() {
   cellsLayer.clearLayers();
-  cellsLayer.addData(await (await api("/api/cache/cells")).json());
+  if (shownImagery) cellsLayer.addData(await (await api(`/api/cache/cells?imagery=${shownImagery}`)).json());
 }
 
 // Simulation: runs execute on the server, the 3D viewer of each is shown in an iframe.
@@ -210,7 +257,8 @@ function updateSimButton() {
 // Other NAIP years over the route, looked up once it is cached so the list is ready before it is opened.
 let yearsKey = null;
 async function refreshYears() {
-  const key = routeCells;
+  const satellite = $("imagery").value === "sentinel2";
+  const key = `${routeCells}/${satellite}`;
   if (key === yearsKey) return;
   yearsKey = key;
   try {
@@ -218,9 +266,11 @@ async function refreshYears() {
     if (key !== yearsKey) return;
     const sel = $("sim_world"), keep = sel.value;
     while (sel.options.length > 1) sel.remove(1);
+    // A camera seeing 10 m imagery from 120 m would be far blurrier than a real one, so NAIP is the default there.
+    if (satellite && years.length) sel.add(new Option("Newest NAIP (realistic, downloads it if needed)", "newest"));
     years.forEach((y) => sel.add(new Option(`NAIP ${y} (realistic, downloads it if needed)`, y)));
-    sel.value = keep;
-    if (sel.selectedIndex < 0) sel.selectedIndex = 0;
+    sel.value = keep || (satellite && years.length ? "newest" : "");
+    if (sel.selectedIndex < 0) sel.value = satellite && years.length ? "newest" : "";
   } catch (e) { yearsKey = null; console.warn(e); }
 }
 
@@ -259,7 +309,7 @@ function simRequest() {
     options: {
       seed: +$("sim_seed").value, wind_speed: +$("sim_wind").value, wind_from_deg: +$("sim_wind_from").value,
       gust: +$("sim_gust").value, realtime: +$("sim_pace").value,
-      world_year: $("sim_world").value ? +$("sim_world").value : null,
+      world_year: $("sim_world").value === "newest" ? "newest" : $("sim_world").value ? +$("sim_world").value : null,
       appearance: lookValues(), navigation: $("sim_nav").value,
       compass_bias_deg: +$("sim_compass").value, height_bias_pct: +$("sim_height").value,
     },
@@ -349,7 +399,7 @@ function renderRun(run) {
     let frac = 0, text = "Building the map…";
     if (run.state === "fetching" && run.cells) {
       frac = run.cells.total ? run.cells.done / run.cells.total : 1;
-      text = `Downloading NAIP ${run.options.world_year}: ${run.cells.done} / ${run.cells.total} cells`;
+      text = `Downloading ${worldName(run.options.world_year)}: ${run.cells.done} / ${run.cells.total} cells`;
     } else if (run.state === "running") {
       text = "Starting the simulator…";
       if (run.progress) {
@@ -363,6 +413,8 @@ function renderRun(run) {
   $("sim_result").textContent = active ? "" : resultText(run);
 }
 
+const worldName = (year) => (year === "newest" ? "the newest NAIP" : `NAIP ${year}`);
+
 function resultText(run) {
   if (run.state === "failed") return `Failed: ${run.error}`;
   if (run.state === "stopped") return "Stopped before the end of the flight.";
@@ -370,7 +422,8 @@ function resultText(run) {
   const end = s.landed ? `Landed ${s.landing_error_m} m from the target.`
     : s.mission_complete ? `Reached the last waypoint, ${s.landing_error_m} m off.` : "Ran out of time before finishing.";
   const alone = run.options.navigation === "odometry";
-  const note = (run.options.world_year ? `Camera saw NAIP ${run.options.world_year}.`
+  const note = (run.imagery === "sentinel2" ? "Map from Sentinel-2. " : "") +
+    (run.options.world_year ? `Camera saw ${worldName(run.options.world_year)}.`
     : alone ? "" : "The camera saw the map's own imagery, so this is optimistic.") +
     (s.compass_bias_deg ? ` Compass bias ${s.compass_bias_deg}°.` : "") + (s.height_bias_pct ? ` Height bias ${s.height_bias_pct}%.` : "");
   const look = Object.entries(s.appearance || {}).map(([name, v]) => `${name.replace(/_/g, " ")} ${v}`).join(", ");
@@ -401,7 +454,7 @@ async function refreshRuns() {
   while (sel.options.length > 1) sel.remove(1);
   runs.forEach((r) => {
     const outcome = r.state === "finished" ? `${r.summary.ekf_err_median_m} m median` : r.state;
-    const nav = r.options.navigation === "odometry" ? "odometry only, " : "";
+    const nav = (r.imagery === "sentinel2" ? "Sentinel-2, " : "") + (r.options.navigation === "odometry" ? "odometry only, " : "");
     sel.add(new Option(`${r.name}, ${r.created.slice(5, 16).replace("T", " ")}: ${nav}${outcome}`, r.id));
   });
   sel.value = openRun || "";
@@ -410,12 +463,12 @@ async function refreshRuns() {
 
 (async () => {
   const cfg = await (await api("/api/config")).json();
-  $("cfg").textContent = `Imagery source: ${cfg.source}, cache GSD ${cfg.gsd} m, data in ${cfg.data_dir}`;
+  $("cfg").textContent = `NAIP: ${cfg.source}, ${cfg.gsd} m. Sentinel-2: ${cfg.s2_source}, ${cfg.s2_gsd} m. Data in ${cfg.data_dir}`;
   simulator = cfg.simulator;
   $("simsec").hidden = !simulator;
   $("sim_missing").hidden = simulator;
   refreshSaved();
-  refreshCells();
+  showImagery($("imagery").value);
   check();
   if (simulator) {
     const running = (await refreshRuns()).find((r) => ACTIVE.includes(r.state));

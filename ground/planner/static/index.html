@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NAIP Flight Planner</title>
+  <title>Flight Planner</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <aside id="panel">
-    <h1>NAIP flight planner</h1>
+    <h1>Flight planner</h1>
 
     <section>
       <label title="Name of this plan, used when saving it and for the exported bundle. Letters, digits, - and _ only; anything else becomes _.">Mission <input id="name" value="mission1"></label>
@@ -24,6 +24,10 @@
       <label title="Height to climb to straight above the first waypoint before flying the route, in metres. Below about 60 m (with a 90 degree lens) the vehicle navigates on visual odometry alone, not the map.">Takeoff alt (m) <input id="takeoff_alt" type="number" value="30" min="5"></label>
       <label title="Cruise speed between waypoints. It sets the mission's speed and the time estimate. The built-in simulator flies at 10 m/s at most.">Speed (m/s) <input id="speed" type="number" value="10" min="1" step="0.5"></label>
       <label title="How far the imagery extends on each side of the route, so the whole band is twice this wide. Every NAIP cell the band touches is downloaded, and imagery outside it is left out of the mission's map, so the vehicle cannot match against the map if it drifts further. Wider means more cells to download and a bigger bundle.">Corridor half-width (m) <input id="corridor_m" type="number" value="400" min="50" step="50"></label>
+      <label title="What the map the vehicle navigates by is made from. NAIP: 0.6 m aerial imagery, a year or more old, US only; matching works from about 60 m up with a 90 degree lens. Sentinel-2: 10 m satellite imagery from the last few weeks, worldwide, but its pixels are so coarse that matching only works from about 200 to 300 m up, above the US 120 m limit; lower down the flight runs on odometry alone." class="wide">Map imagery <select id="imagery">
+        <option value="naip">NAIP (0.6 m aerial)</option>
+        <option value="sentinel2">Sentinel-2 (10 m satellite)</option>
+      </select></label>
       <label title="Horizontal field of view of the downward camera. With altitude it sets how wide a strip of ground each frame sees, which is shown below. Wide lenses, about 90 degrees, match the map best.">Camera HFOV (deg) <input id="hfov_deg" type="number" value="90" min="10" max="170"></label>
       <label title="What happens after the last waypoint. Return to launch: fly back to the first waypoint and land. Land at last WP: land there. Loiter / nothing: no landing is planned, and the vehicle stays in the air at the last waypoint.">End <select id="end_action">
         <option value="rtl">Return to launch</option>
@@ -33,6 +37,7 @@
     </section>
 
     <section>
+      <p id="imagery_note" class="hint" hidden></p>
       <h2>Waypoints <small>click map to add, drag to move</small></h2>
       <ol id="wps"></ol>
       <button id="clear" class="ghost">Clear all</button>
@@ -42,7 +47,7 @@
     <ul id="warnings"></ul>
 
     <section class="actions">
-      <button id="cache" title="Download the NAIP cells the corridor touches, skipping any already on disk. A cell is 0.01 degrees square, about 1 km, and is kept for every mission that uses it.">Cache NAIP for route<small id="naip_years"></small></button>
+      <button id="cache" title="Download the chosen imagery's cells that the corridor touches, skipping any already on disk. A cell is 0.01 degrees square, about 1 km, and is kept for every mission that uses it."><span id="cache_name">Cache NAIP for route</span><small id="naip_years"></small></button>
       <div id="progress" class="progress" hidden><div id="bar" class="bar"></div><span id="ptext" class="ptext"></span></div>
       <button id="export" class="primary">Export mission bundle (.zip)</button>
       <button id="wpl" class="ghost">Download .waypoints only</button>
@@ -51,7 +56,7 @@
     <section id="simsec">
       <h2>Simulate <small>a GPS-denied flight of this route</small></h2>
       <div class="grid">
-        <label title="NAIP imagery the simulated camera sees; the map the vehicle navigates by stays the same. The map's own imagery makes matching too easy. Another year adds real changes in buildings, crops and light, so it is the fairer test. Other years are listed once the route is cached, and download once." class="wide">Camera imagery <select id="sim_world">
+        <label title="Imagery the simulated camera sees; the map the vehicle navigates by stays the same. The map's own imagery makes matching too easy, and with a Sentinel-2 map it also makes the camera far blurrier than a real one. NAIP from another year adds real changes in buildings, crops and light, so it is the fairer test. Other years are listed once the route is cached, and download once." class="wide">Camera imagery <select id="sim_world">
           <option value="">Same imagery as the map (optimistic)</option>
         </select></label>
         <label title="Steady wind speed during the simulated flight.">Wind (m/s) <input id="sim_wind" type="number" value="3" min="0" max="30" step="0.5"></label>

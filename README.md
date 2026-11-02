@@ -3,11 +3,11 @@
 Two separate parts:
 
 * **`ground/`** is a web flight planner (FastAPI + Leaflet). It downloads and
-  caches NAIP imagery, lets you click waypoints on a map, and exports a
-  *mission bundle*: the ArduPilot mission plus a NAIP mosaic of the route corridor.
+  caches NAIP or Sentinel-2 imagery, lets you click waypoints on a map, and exports a
+  *mission bundle*: the ArduPilot mission plus a mosaic of that imagery along the route.
 * **`onboard/`** runs on an NVIDIA Jetson next to the flight controller. It
   orthorectifies frames from a downward camera using the autopilot's attitude
-  and height, matches them to the bundle's NAIP mosaic, filters the fixes, and
+  and height, matches them to the bundle's mosaic, filters the fixes, and
   sends the result to ArduPilot as a MAVLink `GPS_INPUT`, so the EKF flies the
   mission on vision instead of satellites.
 
@@ -25,11 +25,11 @@ uvicorn planner.app:app --port 8347      # open http://localhost:8347
 Hover over any field for what it means.
 
 1. Click the map to add waypoints (drag to move, set per-waypoint altitude if needed).
-2. **Cache NAIP for route** downloads every 0.01 degree cell (about 1 km) that the
+2. **Cache for route** downloads every 0.01 degree cell (about 1 km) that the
    corridor touches: the band extending the corridor half-width to each side of the route.
    Reads are windowed range requests against the Planetary Computer COGs, so only
-   the needed pixels are fetched. Cells are kept in `data/naip/` and reused across missions.
-   The button names the NAIP year the route uses.
+   the needed pixels are fetched. Cells are kept in `data/naip/` and `data/sentinel2/`
+   and reused across missions. The button names the imagery's date.
 3. **Run simulation** flies the route GPS-denied and shows the flight live in 3D,
    then the error statistics. Choose another NAIP year as the camera imagery for a
    realistic result: with the map's own imagery the matching is too easy. That
@@ -43,17 +43,29 @@ Hover over any field for what it means.
 4. **Export mission bundle** gives a zip with `mission.waypoints` (QGC WPL 110),
    `mission.json` and `map.tif` (UTM, RGB, 0.6 m).
 
+**Map imagery** chooses what the plan navigates by, and the buttons on the map
+choose what you see, without changing the plan:
+
+* **NAIP**: 0.6 m aerial imagery, US only, a year or more old. Matches from about
+  60 m up with a 90° lens.
+* **Sentinel-2**: 10 m satellite imagery, worldwide, from the last few weeks, and
+  about 200 times smaller to store. Its pixels are so coarse that it only matches
+  from about 200 to 300 m up, above the 120 m US limit. Lower down there are no map
+  fixes, and the flight loses its position after about 1.2 km. Where there is no
+  NAIP, plans use Sentinel-2 automatically.
+
 Settings (environment variables): `NAIPNAV_DATA` (data dir), `NAIPNAV_GSD`
-(cache resolution, default 0.6 m), `NAIPNAV_SOURCE` (`pc` for Planetary Computer,
+(NAIP cache resolution, default 0.6 m), `NAIPNAV_SOURCE` (`pc` for Planetary Computer,
 or a directory of NAIP GeoTIFFs you downloaded, e.g. from USGS EarthExplorer),
+`NAIPNAV_S2_SOURCE` (the same for Sentinel-2),
 `NAIPNAV_YEARS` (limit to NAIP years, e.g. `2022,2023`; cached separately from
 the default newest-first cache), `NAIPNAV_FETCH_THREADS` (cells downloaded in
 parallel, default 6). Caching takes roughly 5 to 10 s per cell from Planetary
 Computer (the imagery is stored in West Europe).
 
 The planner warns when the camera footprint is too small for reliable matching.
-Rule of thumb: the footprint should be at least ~250 map pixels (~150 m at
-0.6 m), which means a wide lens (about 90° HFOV) at 100 to 120 m AGL.
+Rule of thumb: the footprint should be at least ~150 m on NAIP, which means a wide
+lens (about 90° HFOV) at 100 to 120 m AGL, and ~600 m on Sentinel-2.
 
 ## Onboard (Jetson)
 
@@ -80,8 +92,8 @@ the navigator starts there (`--start lat,lon` and `--start-sigma` otherwise), so
 ArduPilot has a position to arm with and no GNSS is needed at any point. On the
 ground it holds that position; from about 1 m up, frame-to-frame visual
 odometry from the same camera tracks the vehicle through takeoff, landing and
-gaps between map fixes; from about 60 m up (with a 90° lens) frames are also
-matched to the NAIP map. `--matcher` selects how: `corr` (the default), `orb`,
+gaps between map fixes; from about 60 m up (with a 90° lens, about 200 m on a
+Sentinel-2 map) frames are also matched to the map. `--matcher` selects how: `corr` (the default), `orb`,
 `akaze`, `sift`, or several joined by `+` to try in that order. Set `--home-alt`
 to the launch site's elevation (m AMSL) so the EKF origin has the right height.
 
@@ -255,6 +267,9 @@ pytest tests
   nothing else in a flight.
 * `test_sim_web.py` runs, stops, replays and deletes simulations through the
   planner's API, including a camera from another NAIP year and camera appearance.
+* `test_sentinel2.py` checks clouds are kept out of cached cells, that each imagery
+  has its own cache, tiles and bundles, that a coarse map only matches from high
+  enough, and flies a Sentinel-2 map with a camera seeing NAIP.
 * `test_naip.py` checks cached cells land exactly on the UTM grid, including
   when read from a COG overview.
 * `test_odometry.py` checks odometry against known moves from 2 to 120 m, the

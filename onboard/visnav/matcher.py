@@ -1,4 +1,4 @@
-"""Register an orthorectified camera frame against the NAIP map.
+"""Register an orthorectified camera frame against the reference map (NAIP or Sentinel-2).
 
 Two matchers with the same interface, plus a chain of them:
 
@@ -184,35 +184,46 @@ class CorrMatcher:
     footprints are not matched: too little structure to tell a chance alignment
     from a true one, and low down odometry is accurate anyway.
 
+    What matters to all of these is how much of the map's detail is in play, so
+    they are in coarse pixels, not metres. A coarse pixel is 2.4 m on NAIP and
+    10 m on Sentinel-2, which is why Sentinel-2 needs a camera four times higher.
+
     Args:
         map_: reference map.
-        down: coarse stage downsampling (4 gives 2.4 m/px on a 0.6 m map).
+        down: coarse stage downsampling. Default: as near 2.4 m per coarse pixel as
+            the map allows (4 on a 0.6 m map, 1 on a 10 m map).
         sigma: gradient smoothing at the coarse scale, in coarse pixels.
         noise: gradient noise floor in grey levels per pixel (see orientation_field).
         angles: evenly spaced template rotations to try, degrees, for heading error.
-        excl_m: radius around the peak excluded from the sidelobe statistics.
-        fine: refine at full map resolution around the coarse peak.
+        excl_px: radius around the peak excluded from the sidelobe statistics, coarse pixels.
+        fine: refine at full map resolution around the coarse peak, where finer than coarse.
         parts: score by how strongly each quarter of the template supports the
             peak (mean of their PSRs) rather than by the whole template's PSR.
-        sigma_m: 1-sigma accuracy reported with each fix.
+        sigma_m: 1-sigma accuracy reported with each fix. Default: 3 m, or a map pixel if larger.
         min_score: fixes scoring below this are not returned, at or under
-            base_radius_m of search.
-        base_radius_m: see min_score.
-        score_per_radius: added to min_score per e-fold of search radius above base_radius_m.
-        min_area_m2: smaller footprints are not matched (8000 is 60 m up with a 90 degree lens).
+            base_radius_px of search. Default: 2.6, or 3.0 on a map with no finer stage
+            (chance peaks on Sentinel-2 reach about 2.8).
+        base_radius_px: see min_score, in coarse pixels.
+        score_per_radius: added to min_score per e-fold of search radius above base_radius_px.
+        min_area_px: smaller footprints are not matched, in coarse pixels. Default: 1390,
+            about 60 m up on NAIP with a 90 degree lens, or 500 on a map with no finer
+            stage, about 200 m up on Sentinel-2.
         strong_score: score at which a fix counts as strong.
     """
 
-    def __init__(self, map_: MapRaster, down: int = 4, sigma: float = 1.0, noise: float = 2.0,
-                 angles: tuple[float, ...] = tuple(float(a) for a in range(-16, 17, 4)), excl_m: float = 12.0,
-                 fine: bool = True, parts: bool = True, sigma_m: float = 3.0, min_score: float = 2.6,
-                 base_radius_m: float = 40.0, score_per_radius: float = 0.7, min_area_m2: float = 8000.0,
+    def __init__(self, map_: MapRaster, down: int | None = None, sigma: float = 1.0, noise: float = 2.0,
+                 angles: tuple[float, ...] = tuple(float(a) for a in range(-16, 17, 4)), excl_px: float = 5.0,
+                 fine: bool = True, parts: bool = True, sigma_m: float | None = None, min_score: float | None = None,
+                 base_radius_px: float = 16.67, score_per_radius: float = 0.7, min_area_px: float | None = None,
                  strong_score: float = 4.0):
+        down = down or max(1, round(2.4 / map_.gsd))
+        min_score = (2.6 if down > 1 else 3.0) if min_score is None else min_score
+        min_area_px = (1390.0 if down > 1 else 500.0) if min_area_px is None else min_area_px
         self.map, self.down, self.sigma, self.noise = map_, down, sigma, noise
-        self.angles, self.excl_m, self.fine = angles, excl_m, fine
-        self.parts, self.sigma_m = parts, sigma_m
-        self.min_score, self.base_radius_m, self.score_per_radius = min_score, base_radius_m, score_per_radius
-        self.min_area_m2, self.strong_score = min_area_m2, strong_score
+        self.angles, self.excl_px, self.fine = angles, excl_px, fine and down > 1
+        self.parts, self.sigma_m = parts, max(3.0, map_.gsd) if sigma_m is None else sigma_m
+        self.min_score, self.base_radius_px, self.score_per_radius = min_score, base_radius_px, score_per_radius
+        self.min_area_px, self.strong_score = min_area_px, strong_score
         g = cv2.resize(map_.gray, None, fx=1 / down, fy=1 / down, interpolation=cv2.INTER_AREA)
         v = cv2.resize(map_.valid.astype(np.uint8), (g.shape[1], g.shape[0]), interpolation=cv2.INTER_AREA)
         self.valid_c = cv2.erode(v, np.ones((3, 3), np.uint8)) > 0
@@ -220,8 +231,7 @@ class CorrMatcher:
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
     def required_score(self, search_radius_px: int) -> float:
-        radius_m = search_radius_px * self.map.gsd
-        return self.min_score + self.score_per_radius * math.log(max(radius_m / self.base_radius_m, 1.0))
+        return self.min_score + self.score_per_radius * math.log(max(search_radius_px / self.down / self.base_radius_px, 1.0))
 
     def _template(self, img: np.ndarray, mask: np.ndarray, down: int, sigma: float, angle: float,
                   centre: tuple[float, float]):
@@ -286,7 +296,7 @@ class CorrMatcher:
         if best is None:
             return None
         peak, R, r, c, i, t, tmask = best
-        if float(tmask.sum()) * (d * self.map.gsd) ** 2 < self.min_area_m2:
+        if float(tmask.sum()) < self.min_area_px:
             return None
         # On the rim the surface is only rising towards something further out, not at a peak.
         if d2[r, c] > (s - 1) ** 2:
@@ -298,7 +308,7 @@ class CorrMatcher:
             ang_fit = ang
 
         # Score: PSR over the search disc, and the strongest rival peak.
-        ex = max(1, int(round(self.excl_m / (self.map.gsd * d))))
+        ex = max(1, int(round(self.excl_px)))
         far = in_disc & ((yy - r) ** 2 + (xx - c) ** 2 > ex * ex)
         if far.sum() < 10:
             return None

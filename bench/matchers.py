@@ -36,7 +36,7 @@ class OrbMatcher:
 
 def corr_matcher(map_: MapRaster, **kw) -> CorrMatcher:
     """The navigator's CorrMatcher, returning every fix whatever its score."""
-    return CorrMatcher(map_, **{"min_score": 0.0, "score_per_radius": 0.0, "min_area_m2": 0.0, **kw})
+    return CorrMatcher(map_, **{"min_score": 0.0, "score_per_radius": 0.0, "min_area_px": 0.0, **kw})
 
 
 # Learned features + LightGlue -------------------------------------------------

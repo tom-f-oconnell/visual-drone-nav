@@ -16,7 +16,7 @@ odometry alone, each naming the other as its partner in run.json.
 The viewer follows records.jsonl, so a finished run replays the same way as a
 live one, and runs survive a restart of the planner. The temporary bundle (the
 map and camera GeoTIFFs) is deleted after each run, because it can be rebuilt
-from the NAIP cache.
+from the imagery caches.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, Field
 
 from .mission import Mission, build_map, write_bundle
-from .naip import NaipCache
+from .imagery import CellCache
 
 log = logging.getLogger(__name__)
 MAX_RUNNING = 3
@@ -64,7 +64,8 @@ class SimOptions(BaseModel):
     wind_from_deg: float = Field(300.0, ge=0, le=360, description="direction the wind blows from")
     gust: float = Field(1.5, ge=0, le=15, description="m/s")
     realtime: float = Field(0.0, ge=0, le=100, description="multiple of real time, 0 for as fast as possible")
-    world_year: int | None = Field(None, description="render the camera from this NAIP year instead of the map")
+    world_year: int | Literal["newest"] | None = Field(None, description="render the camera from this NAIP year, or the newest "
+                                                       "NAIP as cached for maps, instead of from the map")
     appearance: dict[str, float] = Field(default_factory=dict, description="visnav.appearance.Appearance fields to change")
     navigation: Literal["map", "odometry"] = Field("map", description="odometry alone never looks at the saved imagery")
     compass_bias_deg: float = Field(0.0, ge=-45, le=45, description="heading error lasting the whole flight")
@@ -81,13 +82,13 @@ class SimRuns:
 
     Args:
         root: directory holding one subdirectory per run.
-        cache: NAIP cache the map is built from.
+        caches: the imagery caches maps are built from, by Mission.imagery.
         year_cache: returns the NAIP cache of one year, for world_year.
         fetch_threads: cells downloaded in parallel for world_year.
     """
 
-    def __init__(self, root: Path, cache: NaipCache, year_cache: Callable[[int], NaipCache], fetch_threads: int = 6):
-        self.root, self.cache, self.year_cache = root, cache, year_cache
+    def __init__(self, root: Path, caches: dict[str, CellCache], year_cache: Callable[[int], CellCache], fetch_threads: int = 6):
+        self.root, self.caches, self.year_cache = root, caches, year_cache
         self.fetch_threads = fetch_threads
         self.root.mkdir(parents=True, exist_ok=True)
         self._live: dict[str, dict] = {}  # in-memory state of runs this process is executing
@@ -113,7 +114,7 @@ class SimRuns:
             d.mkdir()
             (d / "run.json").write_text(json.dumps({
                 "id": run_id, "name": mission.name, "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "options": options.model_dump(), "partner": partner,
+                "options": options.model_dump(), "partner": partner, "imagery": mission.imagery,
             }))
             thread.start()
 
@@ -134,7 +135,7 @@ class SimRuns:
         d, live = self.root / run_id, self._live[run_id]
         bundle = d / "bundle"
         try:
-            write_bundle(mission, self.cache, bundle)
+            write_bundle(mission, self.caches[mission.imagery], bundle)
             cmd = [sys.executable, "-m", "visnav.main", "sim3d", "--bundle", str(bundle), "--port", "0", "--exit",
                    "--run-dir", str(d), "--seed", str(options.seed), "--gust", str(options.gust),
                    "--realtime", str(options.realtime)]
@@ -168,9 +169,9 @@ class SimRuns:
             with self._lock:
                 self._live.pop(run_id, None)
 
-    def _build_world(self, mission: Mission, year: int, bundle: Path, live: dict) -> Path:
-        """Mosaic the corridor from one NAIP year, downloading the cells that are not cached."""
-        cache = self.year_cache(year)
+    def _build_world(self, mission: Mission, year: int | str, bundle: Path, live: dict) -> Path:
+        """Mosaic the corridor from one NAIP year or the newest, downloading the cells that are not cached."""
+        cache = self.caches["naip"] if year == "newest" else self.year_cache(year)
 
         def fetch(cell):
             if not live["cancel"]:
@@ -188,7 +189,7 @@ class SimRuns:
         path = bundle / "world.tif"
         coverage = build_map(mission, cache, path)["coverage"]
         if coverage < 0.5:
-            raise ValueError(f"NAIP {year} covers only {100 * coverage:.0f}% of the corridor")
+            raise ValueError(f"NAIP ({year}) covers only {100 * coverage:.0f}% of the corridor")
         return path
 
     def _last_record(self, d: Path) -> dict | None:

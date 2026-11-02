@@ -26,6 +26,11 @@ button.ghost { background: none; }
 button:disabled { opacity: .5; cursor: default; }
 .actions button { display: block; width: 100%; margin-bottom: 6px; }
 #naip_years { display: block; font-size: 11px; color: var(--muted); }
+.imagery-view { display: flex; box-shadow: 0 1px 4px rgba(0, 0, 0, .3); border-radius: 4px; }
+.imagery-view button { border-radius: 0; font-size: 12px; padding: 4px 9px; border-right-width: 0; }
+.imagery-view button:first-child { border-radius: 4px 0 0 4px; }
+.imagery-view button:last-child { border-radius: 0 4px 4px 0; border-right-width: 1px; }
+.imagery-view button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
 ol#wps { padding-left: 22px; margin: 0 0 6px; max-height: 260px; overflow-y: auto; }
 ol#wps li { margin-bottom: 4px; }
 ol#wps .wp { display: flex; gap: 4px; align-items: center; font-size: 12px; }
