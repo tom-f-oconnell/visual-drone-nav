@@ -196,14 +196,202 @@ def test_compare_with_and_without_map_matching(client):
     assert alone["compass_bias_deg"] == with_map["compass_bias_deg"] == 3.0
 
     data = client.get(f"/api/sim/compare/{a['id']}/{b['id']}").json()
-    assert not data["active"] and len(data["plan"]) >= 3
+    assert not data["active"]
     for run in data["runs"]:
         s = run["series"]
+        assert len(run["plan"]) >= 3 and run["plan"][0] == [0, 0]
         assert len(s["km"]) == len(s["err"]) == len(s["x"]) == len(s["y"]) > 10
         assert s["km"] == sorted(s["km"]) and s["km"][-1] == pytest.approx(run["summary"]["distance_m"] / 1000, abs=0.01)
-    page = client.get(f"/static/compare.html?a={a['id']}&b={b['id']}")
-    assert page.status_code == 200 and "Odometry only" in page.text
+    assert [r["settings"]["Navigation"] for r in data["runs"]] == ["with map matching", "odometry only"]
+    assert client.get(f"/static/compare.html?a={a['id']}&b={b['id']}").status_code == 200
     assert client.get(f"/api/sim/compare/{a['id']}/00000000").status_code == 404
+
+
+def test_compare_any_two_flights_of_the_same_waypoints_and_fly_them_again(client):
+    """Altitude and wind differ. The results come from what is stored, and the same waypoints are required."""
+    import planner.app
+
+    low = {**mission("low"), "default_alt": 70}
+    first = client.post("/api/sim/runs", json={"mission": mission("cmp_any"), "options": {"seed": 4, "wind_speed": 1.0}}).json()["id"]
+    second = client.post("/api/sim/runs", json={"mission": low, "options": {"seed": 5, "wind_speed": 6.0}}).json()["id"]
+    a, b = (wait_for(client, i, ("finished", "failed", "stopped")) for i in (first, second))
+    assert a["state"] == b["state"] == "finished", (a, b)
+    assert a["route"] == b["route"] and a["partner"] is None
+    assert a["mission"]["default_alt"] == 80 and b["mission"]["default_alt"] == 70
+
+    # Results do not need the flights' records, which are by far their largest part.
+    data = client.get(f"/api/sim/compare/{first}/{second}").json()
+    for run_id in (first, second):
+        (planner.app.DATA / "sim" / run_id / "records.jsonl").unlink()
+    assert client.get(f"/api/sim/compare/{first}/{second}").json()["runs"][0]["series"] == data["runs"][0]["series"]
+    settings = [r["settings"] for r in data["runs"]]
+    assert [s["Wind"] for s in settings] == ["1 m/s from 300°", "6 m/s from 300°"]
+    assert [s["Cruise altitude"] for s in settings] == ["80 m", "70 m"]
+    assert settings[0]["Corridor half-width"] == settings[1]["Corridor half-width"] == "250 m"
+
+    # Another route is not comparable, even with the same name.
+    other = {**mission("cmp_any"), "waypoints": [{"lat": LAT - 0.002, "lon": LON}, {"lat": LAT + 0.002, "lon": LON + 0.001}]}
+    elsewhere = client.post("/api/sim/runs", json={"mission": other}).json()["id"]
+    assert wait_for(client, elsewhere, ("finished", "failed", "stopped"))["route"] != a["route"]
+    assert client.get(f"/api/sim/compare/{first}/{elsewhere}").status_code == 409
+    assert client.post(f"/api/sim/compare/{first}/{elsewhere}/rerun").status_code == 409
+
+    # Flown again, each keeps what it was asked for, as new runs that name each other.
+    again = client.post(f"/api/sim/compare/{first}/{second}/rerun").json()
+    assert (again[0]["partner"], again[1]["partner"]) == (again[1]["id"], again[0]["id"])
+    assert [r["options"]["seed"] for r in again] == [4, 5] and [r["options"]["wind_speed"] for r in again] == [1.0, 6.0]
+    assert again[1]["mission"]["default_alt"] == 70
+    assert client.post(f"/api/sim/compare/{first}/{second}/rerun").status_code == 429  # the limit on running at once
+    for run in again:
+        client.post(f"/api/sim/runs/{run['id']}/stop")
+    for run in again:
+        wait_for(client, run["id"], ("finished", "failed", "stopped"), seconds=30)
+    seeded = client.post(f"/api/sim/compare/{first}/{second}/rerun", params={"new_seed": True}).json()
+    assert seeded[0]["options"]["seed"] == seeded[1]["options"]["seed"]
+    for run in seeded:
+        client.post(f"/api/sim/runs/{run['id']}/stop")
+    for run in seeded:
+        wait_for(client, run["id"], ("finished", "failed", "stopped"), seconds=30)
+    assert first in {r["id"] for r in client.get("/api/sim/runs").json()}  # the originals stay
+
+
+def fake_run(root, run_id, home=(0.0, 0.0), points=((0.0, 0.0), (100.0, 0.0), (100.0, 250.0)), end="land", alt=120.0,
+             options=None, mission=True, summary=True, track=(10.0, 3.0)):
+    """A stored run as the simulator leaves one, on a map whose centre puts home at `home`."""
+    d = root / run_id
+    d.mkdir()
+    at = [(home[0] + x, home[1] + y) for x, y in points]
+    plan = [{"kind": "takeoff", "x": home[0], "y": home[1], "alt": 30.0}] + [{"kind": "wp", "x": x, "y": y, "alt": alt} for x, y in at]
+    plan += {"land": [{"kind": "land", "x": at[-1][0], "y": at[-1][1], "alt": 0.0}],
+             "rtl": [{"kind": "wp", "x": home[0], "y": home[1], "alt": alt}, {"kind": "land", "x": home[0], "y": home[1], "alt": 0.0}],
+             "none": []}[end]
+    (d / "scene.json").write_text(json.dumps({"home": list(home), "plan": plan, "camera": {"hfov_deg": 89.99999, "aspect": 0.625}, "gsd": 0.6, "name": "m"}))
+    run = {"id": run_id, "name": "m", "created": "2026-11-02T10:00:00", "options": options or {}}
+    if mission:
+        run["mission"] = {"speed": 10.0, "corridor_m": 400.0, "camera": {"width_px": 1280, "height_px": 800}}
+    (d / "run.json").write_text(json.dumps(run))
+    with open(d / "records.jsonl", "w") as f:
+        for i in range(5):
+            x, y = home[0] + i * track[0], home[1] + i * track[1]
+            f.write(json.dumps({"t": i * 0.2, "p": [x, y, 50.0], "ekf": [x + 3.0, y + 4.0], "leg": 1}) + "\n")
+    if summary:
+        (d / "summary.json").write_text(json.dumps({"duration_s": 1.0, "landed": True, "ekf_err_median_m": 5.0}))
+    return d
+
+
+@pytest.fixture
+def runs(tmp_path):
+    from planner.simruns import SimRuns
+
+    return SimRuns(tmp_path, None)
+
+
+def test_same_route_on_any_map_at_any_altitude_with_any_ending(runs):
+    fake_run(runs.root, "00000001")
+    fake_run(runs.root, "00000002", home=(-3601.5, 692.55), alt=300.0)  # another map's centre
+    fake_run(runs.root, "00000003", end="rtl")
+    fake_run(runs.root, "00000004", end="none")
+    fake_run(runs.root, "00000005", points=((0.0, 0.0), (100.0, 0.0), (100.0, 251.0)))
+    fake_run(runs.root, "00000006", points=((0.0, 0.0), (100.0, 0.0)))
+    routes = [runs.info(f"0000000{i}")["route"] for i in range(1, 7)]
+    assert len(set(routes[:4])) == 1 and len(set(routes)) == 3
+
+
+def test_paths_are_measured_from_home_so_different_maps_line_up(runs):
+    fake_run(runs.root, "00000001")
+    fake_run(runs.root, "00000002", home=(-3601.5, 692.55))
+    a, b = runs.comparison("00000001", "00000002")["runs"]
+    assert a["series"]["x"] == b["series"]["x"] == [0.0, 10.0, 20.0, 30.0, 40.0]
+    assert a["series"]["y"] == b["series"]["y"] == [0.0, 3.0, 6.0, 9.0, 12.0]
+    assert a["plan"] == b["plan"] and a["plan"][0] == [0.0, 0.0] and [100.0, 250.0] in a["plan"]
+    assert a["series"]["err"] == [5.0] * 5
+
+
+def test_series_is_stored_once_and_follows_the_records(runs):
+    d = fake_run(runs.root, "00000001")
+    first = runs.series("00000001")
+    assert json.loads((d / "series.json").read_text()) == first
+    (d / "records.jsonl").unlink()
+    assert runs.series("00000001") == first
+    (d / "records.jsonl").write_text(json.dumps({"p": [1.0, 0.0, 0.0], "ekf": [1.0, 0.0]}) + "\n")
+    assert runs.series("00000001")["x"] == [1.0]  # flown further since, e.g. by another planner process
+
+
+def test_series_of_a_run_in_flight_is_not_stored(runs):
+    d = fake_run(runs.root, "00000001", summary=False)
+    runs._live["00000001"] = {"state": "running", "cells": None}
+    assert len(runs.series("00000001")["km"]) == 5
+    assert not (d / "series.json").exists()
+
+
+@pytest.mark.parametrize("options, name", [
+    ({"navigation": "odometry"}, "Navigation"),
+    ({"world_year": 2020}, "Camera imagery"),
+    ({"world_imagery": "sentinel2", "world_year": 2024}, "Camera imagery"),
+    ({"fog": {"visibility": 400.0}}, "Fog"),
+    ({"appearance": {"gamma": 1.2}}, "Camera appearance"),
+    ({"wind_speed": 8.0}, "Wind"),
+    ({"wind_from_deg": 10.0}, "Wind"),
+    ({"gust": 4.0}, "Gusts"),
+    ({"compass_bias_deg": 2.0}, "Compass bias"),
+    ({"height_bias_pct": 5.0}, "Height bias"),
+    ({"seed": 7}, "Seed"),
+])
+def test_each_option_shows_as_a_difference(runs, options, name):
+    fake_run(runs.root, "00000001")
+    fake_run(runs.root, "00000002", options=options)
+    a, b = (runs.info(i)["settings"] for i in ("00000001", "00000002"))
+    assert [k for k in a if a[k] != b[k]] == [name]
+
+
+def test_each_part_of_the_plan_shows_as_a_difference(runs):
+    def changed(**fake):
+        fake_run(runs.root, "00000001")
+        fake_run(runs.root, "00000002", **fake)
+        a, b = (runs.info(i)["settings"] for i in ("00000001", "00000002"))
+        for i in ("00000001", "00000002"):
+            runs.delete(i)
+        return {k: (a[k], b[k]) for k in a if a[k] != b[k]}
+
+    assert changed(alt=300.0) == {"Cruise altitude": ("120 m", "300 m")}
+    assert changed(end="rtl") == {"End of flight": ("land at the last waypoint", "return to launch")}
+    assert changed(end="none") == {"End of flight": ("land at the last waypoint", "stay at the last waypoint")}
+
+    # And what only run.json has, or what the world turned out to be.
+    a, b = fake_run(runs.root, "00000001"), fake_run(runs.root, "00000002")
+    for d, speed, corridor, gsd, imagery in ((a, 10.0, 400.0, 0.6, "naip"), (b, 5.0, 700.0, 10.0, "sentinel2")):
+        run = json.loads((d / "run.json").read_text())
+        run["mission"].update(speed=speed, corridor_m=corridor, camera={"width_px": 640, "height_px": 400})
+        (d / "run.json").write_text(json.dumps({**run, "imagery": imagery, "imagery_date": "2026-01-02" if gsd == 10.0 else None}))
+        scene = json.loads((d / "scene.json").read_text())
+        (d / "scene.json").write_text(json.dumps({**scene, "gsd": gsd, "camera": {"hfov_deg": 90 if gsd == 0.6 else 70.0}}))
+    (b / "world.json").write_text(json.dumps({"clouds": "real", "pass_date": "2026-10-29", "cloud_pct": 40.5, "base_m": 750.0}))
+    s = runs.info("00000002")["settings"]
+    assert s["Map imagery"] == "Sentinel-2 as of 2026-01-02, 10 m" and runs.info("00000001")["settings"]["Map imagery"] == "NAIP, 0.6 m"
+    assert s["Speed"] == "5 m/s" and s["Corridor half-width"] == "700 m" and s["Camera field of view"] == "70°"
+    assert s["Clouds"] == "pass of 2026-10-29, 40.5% of the route, seen above 750 m"
+
+
+def test_a_run_from_before_plans_were_kept(runs):
+    """Compares using what it stored, says what it did not, and cannot be flown again."""
+    fake_run(runs.root, "00000001", mission=False, options={"seed": 0, "world_year": 2012})
+    fake_run(runs.root, "00000002")
+    old, new = runs.comparison("00000001", "00000002")["runs"]
+    assert old["route"] == new["route"]
+    assert old["settings"]["Speed"] is None and new["settings"]["Speed"] == "10 m/s"
+    assert old["settings"]["Camera field of view"] == "90°" and old["settings"]["Cruise altitude"] == "120 m"
+    assert old["options"]["navigation"] == "map" and old["options"]["clouds"] == "auto"  # as they flew
+    assert old["summary"]["distance_m"] == pytest.approx(41.8, abs=0.5) and old["summary"]["ekf_err_final_m"] == 5.0
+    assert old["summary"]["final_err_pct_of_distance"] == pytest.approx(12, abs=0.5) and old["summary"]["navigation"] == "map"
+    assert runs.rerun_requests("00000001", "00000002") is None
+
+
+def test_stopped_flight_can_be_compared(runs):
+    fake_run(runs.root, "00000001", summary=False)
+    fake_run(runs.root, "00000002")
+    stopped, finished = runs.comparison("00000001", "00000002")["runs"]
+    assert stopped["state"] == "stopped" and stopped["summary"] is None and stopped["series"]["km"]
+    assert finished["state"] == "finished"
 
 
 def test_every_field_explains_itself_on_hover(client):

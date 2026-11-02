@@ -224,6 +224,24 @@ def test_flying_a_sentinel2_map_with_a_camera_seeing_naip(client):
     assert s["landed"] and s["vision_fixes"] > 10 and s["ekf_err_median_m"] < 25, s  # most of a flight this short is too low to match
     assert client.post("/api/sim/runs", json={"mission": m, "options": {"world_year": "last"}}).status_code == 422
 
+    # The same waypoints with a NAIP map: another map's size, resolution and centre, but the same frame to compare in.
+    naip = plan("naip", alt=120)
+    cache_route(client, naip)
+    other = client.post("/api/sim/runs", json={"mission": naip, "options": {"seed": 1}}).json()["id"]
+    for _ in range(600):
+        other_run = client.get(f"/api/sim/runs/{other}").json()
+        if other_run["state"] in ("finished", "failed", "stopped"):
+            break
+        time.sleep(0.5)
+    assert other_run["state"] == "finished", other_run
+    assert other_run["route"] == run["route"]
+    data = client.get(f"/api/sim/compare/{run_id}/{other}").json()
+    assert [r["settings"]["Map imagery"] for r in data["runs"]] == ["Sentinel-2, 10 m", "NAIP, 0.6 m"]
+    assert [r["settings"]["Cruise altitude"] for r in data["runs"]] == ["300 m", "120 m"]
+    plans = [r["plan"] for r in data["runs"]]
+    assert plans[0][-1] == pytest.approx(plans[1][-1], abs=0.1)
+    assert all(math.hypot(r["series"]["x"][0], r["series"]["y"][0]) < 1 for r in data["runs"])
+
 
 # Several dates, and passes kept as they were, for flights under real clouds.
 CLOUDY, OLD_CLEAR, NEWEST = "20240703", "20240601", "20261024"

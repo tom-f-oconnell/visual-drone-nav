@@ -402,11 +402,34 @@ def start_sim_compare(req: SimRequest):
         raise HTTPException(429, str(exc)) from exc
 
 
-@app.get("/api/sim/compare/{a}/{b}")
-def sim_compare(a: str, b: str):
+def _check_comparable(a: str, b: str):
     _run_dir(a)
     _run_dir(b)
+    routes = [sim_runs.info(run_id)["route"] for run_id in (a, b)]
+    if all(routes) and routes[0] != routes[1]:
+        raise HTTPException(409, "these two flights did not fly the same waypoints")
+
+
+@app.get("/api/sim/compare/{a}/{b}")
+def sim_compare(a: str, b: str):
+    """Any two flights of the same waypoints, from what is stored of them."""
+    _check_comparable(a, b)
     return sim_runs.comparison(a, b)
+
+
+@app.post("/api/sim/compare/{a}/{b}/rerun")
+def rerun_sim_compare(a: str, b: str, new_seed: bool = False):
+    """Fly both again as they were asked for, as a new comparison, optionally both with one new seed."""
+    _check_comparable(a, b)
+    requests = sim_runs.rerun_requests(a, b, new_seed)
+    if requests is None:
+        raise HTTPException(409, "a flight from before plans were kept with each run cannot be flown again")
+    for req in requests:
+        _check_can_simulate(req)
+    try:
+        return sim_runs.start_pair(*requests)
+    except TooManyRuns as exc:
+        raise HTTPException(429, str(exc)) from exc
 
 
 @app.get("/api/sim/runs/{run_id}")

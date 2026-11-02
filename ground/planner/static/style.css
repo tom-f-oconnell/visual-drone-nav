@@ -55,6 +55,7 @@ ol#wps .wp button { padding: 1px 6px; }
 #sim_result { font-size: 12px; margin: 0 0 6px; font-variant-numeric: tabular-nums; }
 #sim_result:empty { display: none; }
 #sim_runs { flex: 1; min-width: 0; }
+#sim_compare_with { margin-top: 6px; }
 #sim_missing { font-size: 12px; color: var(--muted); }
 #fog_bar label { flex: 1; }
 #fog_box { font-size: 12px; margin-bottom: 8px; }

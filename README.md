@@ -42,6 +42,10 @@ touching cells, saying whether it has NAIP, Sentinel-2 or both. Click one to go 
    **Compare with and without map matching** flies the route twice with the same
    settings, the second time on visual odometry alone from the first waypoint's
    coordinates, and shows the two side by side under the *Comparison* tab.
+   **Compare with** does this for any flight you open and any other of the same
+   waypoints, whatever else differed (imagery, altitude, camera, wind, clouds), from
+   results stored with each flight, so nothing flies again unless you press **Rerun
+   both**. Flights from before plans were stored with each run compare but cannot rerun.
 4. **Export mission bundle** gives a zip with `mission.waypoints` (QGC WPL 110),
    `mission.json` and `map.tif` (UTM, RGB, 0.6 m).
 
@@ -294,6 +298,8 @@ pytest tests
   nothing else in a flight.
 * `test_sim_web.py` runs, stops, replays and deletes simulations through the
   planner's API, including a camera from another NAIP year and camera appearance.
+  It also compares flights that differ in any setting, from stored results and
+  older run formats, and reruns them.
 * `test_sentinel2.py` checks clouds are kept out of cached cells, that each imagery
   and date has its own cache, tiles and bundles, that a coarse map only matches from
   high enough, how clouds follow altitude, and flies a Sentinel-2 map with a camera

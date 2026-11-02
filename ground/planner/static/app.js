@@ -497,12 +497,13 @@ $("sim_compare").onclick = async () => {
   updateSimButton();
 };
 
-let openPartner = null, wantedView = "sim";
+let openPartner = null, wantedView = "sim", comparePair = null, allRuns = [];
 function followRun(id, wanted = "sim") {
   clearTimeout(simTimer);
   openRun = id;
   openPartner = null;
   wantedView = wanted;
+  if (comparePair && !comparePair.includes(id)) comparePair = null;  // watching one of the two keeps the comparison
   const view = $("simview");
   delete view.dataset.run;
   view.removeAttribute("src");
@@ -512,8 +513,45 @@ function followRun(id, wanted = "sim") {
   $("sim_runs").value = id || "";
   $("sim_result").textContent = "";
   $("sim_progress").hidden = $("sim_stop").hidden = $("sim_delete").hidden = true;
+  fillCompareWith();
   if (id) pollRun();
 }
+
+function showComparison() {
+  if (!comparePair || !$("tab_compare").hidden) return;
+  const page = `/static/compare.html?a=${comparePair[0]}&b=${comparePair[1]}`, frame = $("compareview");
+  if (frame.getAttribute("src") !== page) frame.src = page;
+  $("tab_compare").hidden = false;
+  $("tabs").hidden = false;
+  if (wantedView === "compare") showView("compare");
+  fillCompareWith();
+}
+
+function settingsDiffer(run, other) {
+  const names = Object.keys(run.settings).filter((n) => run.settings[n] !== null && other.settings[n] !== null && run.settings[n] !== other.settings[n]);
+  if (!names.length) return "same settings";
+  return names.slice(0, 3).map((n) => (n === "Navigation" ? other.settings[n] : `${n.toLowerCase()} ${other.settings[n]}`)).join(", ") + (names.length > 3 ? ", …" : "");
+}
+
+// Other flights of the open run's waypoints, each by how it differs from that run.
+function fillCompareWith() {
+  const sel = $("sim_compare_with"), open = allRuns.find((r) => r.id === openRun);
+  const others = open && open.route ? allRuns.filter((r) => r.id !== open.id && r.route === open.route) : [];
+  while (sel.options.length > 1) sel.remove(1);
+  others.forEach((r) => sel.add(new Option(`${r.created.slice(5, 16).replace("T", " ")}: ${settingsDiffer(open, r)}`, r.id)));
+  sel.hidden = !others.length;
+  sel.value = (comparePair || []).find((id) => id !== openRun) || "";
+  if (sel.selectedIndex < 0) sel.value = "";
+}
+
+$("sim_compare_with").onchange = () => {
+  const other = $("sim_compare_with").value;
+  comparePair = other ? [openRun, other] : openPartner ? [openRun, openPartner] : null;
+  wantedView = "compare";
+  $("tab_compare").hidden = true;
+  if (comparePair) showComparison();
+  else showView($("simview").dataset.run ? "sim" : "plan");
+};
 
 async function pollRun() {
   const id = openRun;
@@ -541,13 +579,8 @@ function renderRun(run) {
   if (run.state !== shownState) requestAnimationFrame(() => $("simsec").scrollIntoView({ block: "end" }));
   shownState = run.state;
   openPartner = run.partner || null;
-  if (openPartner && $("tab_compare").hidden) {
-    const page = `/static/compare.html?a=${run.id}&b=${openPartner}`, frame = $("compareview");
-    if (frame.getAttribute("src") !== page) frame.src = page;
-    $("tab_compare").hidden = false;
-    $("tabs").hidden = false;
-    if (wantedView === "compare") showView("compare");
-  }
+  if (!comparePair && openPartner) comparePair = [run.id, openPartner];
+  showComparison();
   const view = $("simview");
   if (run.viewable && view.dataset.run !== run.id) {
     view.dataset.run = run.id;
@@ -637,6 +670,8 @@ async function refreshRuns() {
     sel.add(new Option(`${r.name}, ${r.created.slice(5, 16).replace("T", " ")}: ${nav}${outcome}`, r.id));
   });
   sel.value = openRun || "";
+  allRuns = runs;
+  fillCompareWith();
   return runs;
 }
 
