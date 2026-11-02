@@ -54,6 +54,22 @@ choose what you see, without changing the plan:
   fixes, and the flight loses its position after about 1.2 km. Where there is no
   NAIP, plans use Sentinel-2 automatically.
 
+With Sentinel-2, **Imagery as of** makes the map from the newest clear imagery as of
+a date, leaving clouds out using earlier passes. Each date is stored separately, so you
+can keep several. Caching also keeps that date's last pass as it was, clouds and all,
+for simulated flights.
+
+Simulations can include weather:
+
+* **Clouds**, next to the cruise altitude. By default a flight below 750 m has none,
+  as it is under them, and one going higher sees them only while above 750 m. The
+  text there says which applies as you change altitude, and the control beside it can
+  override it. Clouds and their shadows come from a real Sentinel-2 pass, laid over
+  whatever the camera sees, including NAIP. Choosing a year uses a pass the random
+  seed picks from all of that year's, however cloudy, or you can pick one.
+* **Fog**, at any altitude: none, a preset, or your own visibility, layer height,
+  patchiness, patch size and brightness.
+
 Settings (environment variables): `NAIPNAV_DATA` (data dir), `NAIPNAV_GSD`
 (NAIP cache resolution, default 0.6 m), `NAIPNAV_SOURCE` (`pc` for Planetary Computer,
 or a directory of NAIP GeoTIFFs you downloaded, e.g. from USGS EarthExplorer),
@@ -146,7 +162,8 @@ stretches shaded, and the wind: an arrow on the vehicle and a dial for the wind 
 and the steady wind (the gap between them is the gust), plus a trace of wind speed
 over the flight. `visnav view` has no wind to show, nor do flights saved before it
 was recorded. Orbit, chase and top views; drag to rotate, right-drag or
-shift-drag to pan, wheel or pinch to zoom, double-click to follow again. During a
+shift-drag to pan, wheel or pinch to zoom, double-click to follow again, or **Jump
+to drone** to centre on it from wherever you have got to. During a
 live flight, pausing, scrubbing or picking a speed leaves the newest data until
 playback catches up with it again.
 `--export` writes one self-contained HTML file that replays the flight anywhere.
@@ -180,6 +197,12 @@ visnav sim3d --bundle ~/missions/mission1 --appearance brightness_drift=0.05,col
 | `color_drift` | 0 | 0 to 0.03 | slow wander of each channel separately (same) |
 | `gamma_drift` | 0 | 0 to 0.05 | slow wander of gamma (same) |
 | `drift_tau_s` | 120 | 30 to 300 | seconds the wander takes (correlation time) |
+
+`--fog` adds fog at any height, `on` for the defaults or any of `visibility=400` (m),
+`top=200` (m), `patchiness=0.4` (0 to 1), `patch=300` (m), `brightness=0.8` (0 to 1).
+Without some sensor noise (`--appearance noise=0.01`) fog is easier than it should be,
+as contrast can be recovered perfectly. `--clear-world` and `--cloud-base` give
+imagery to see below a height instead of `--world`, for the planner's clouds.
 
 To see what the saved imagery is worth, fly the same mission without it.
 `--matcher none` runs on visual odometry alone from the mission's first waypoint
@@ -262,14 +285,17 @@ pytest tests
   re-lock rule.
 * `test_compare.py` checks odometry alone never uses the map's pixels, and that a
   lasting compass error hurts it but not map matching.
+* `test_fog.py` checks fog against its definition of visibility, in and above the
+  layer, and that its patches stay on the ground and drift with the wind.
 * `test_appearance.py` checks simulated frames are untouched by default, that
   offsets hold from frame to frame and drift stays slow, and that a look changes
   nothing else in a flight.
 * `test_sim_web.py` runs, stops, replays and deletes simulations through the
   planner's API, including a camera from another NAIP year and camera appearance.
 * `test_sentinel2.py` checks clouds are kept out of cached cells, that each imagery
-  has its own cache, tiles and bundles, that a coarse map only matches from high
-  enough, and flies a Sentinel-2 map with a camera seeing NAIP.
+  and date has its own cache, tiles and bundles, that a coarse map only matches from
+  high enough, how clouds follow altitude, and flies a Sentinel-2 map with a camera
+  seeing NAIP and under clouds.
 * `test_naip.py` checks cached cells land exactly on the UTM grid, including
   when read from a COG overview.
 * `test_odometry.py` checks odometry against known moves from 2 to 120 m, the

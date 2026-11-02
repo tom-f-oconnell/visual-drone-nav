@@ -75,7 +75,11 @@ def render(map_: MapRaster, cam: CameraModel, lat, lon, h, roll, pitch, yaw, *, 
         M = np.array([[1, 0, -(c[0] / c[2] // n) * n], [0, 1, -(c[1] / c[2] // n) * n], [0, 0, 1.0]]) @ M
         tex = cv2.warpPerspective(tile, M, (cam.width, cam.height),
                                   flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
-        img = np.clip(img * (1 + detail * tex[..., None]), 0, 255).astype(np.uint8)
+        contrast = detail * tex[..., None]
+        if map_.cloud is not None:  # grass and gravel are not seen through a cloud
+            cloud = cv2.warpPerspective(map_.cloud, H, (cam.width, cam.height), flags=cv2.WARP_INVERSE_MAP | cv2.INTER_LINEAR)
+            contrast = contrast * (1 - cloud[..., None].astype(np.float32) / 255)
+        img = np.clip(img * (1 + contrast), 0, 255).astype(np.uint8)
     return img
 
 

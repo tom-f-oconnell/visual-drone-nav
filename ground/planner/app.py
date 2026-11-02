@@ -14,6 +14,7 @@ Environment variables:
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import os
 import threading
@@ -22,12 +23,12 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import cv2
 import numpy as np
 import rasterio
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from rasterio.enums import Resampling
@@ -36,8 +37,8 @@ from rasterio.vrt import WarpedVRT
 from shapely.geometry import mapping
 
 from .mission import Mission, build_bundle
-from .imagery import Cell, CellCache, LocalSource, Sentinel2Source, StacSource, cells_for_bbox
-from .simruns import ACTIVE_STATES, SimRequest, SimRuns, TooManyRuns, simulator_available
+from .imagery import Cell, CellCache, Library, LocalSentinel2Source, LocalSource, Sentinel2Source, StacSource, cells_for_bbox
+from .simruns import ACTIVE_STATES, CLOUD_BASE_M, SimRequest, SimRuns, TooManyRuns, simulator_available
 
 DATA = Path(os.environ.get("NAIPNAV_DATA", "data")).resolve()
 GSD = float(os.environ.get("NAIPNAV_GSD", "0.6"))
@@ -47,7 +48,9 @@ S2_GSD = 10.0
 YEARS = [int(y) for y in os.environ.get("NAIPNAV_YEARS", "").split(",") if y.strip()]
 FETCH_THREADS = int(os.environ.get("NAIPNAV_FETCH_THREADS", "6"))
 
+log = logging.getLogger(__name__)
 Imagery = Literal["naip", "sentinel2"]
+Date = Annotated[str | None, Query(pattern=r"^\d{4}-\d{2}-\d{2}$")]
 STATIC = Path(__file__).parent / "static"
 MISSIONS = DATA / "missions"
 BUNDLES = DATA / "bundles"
@@ -59,11 +62,14 @@ def _source(years: list[int] | None = None):
     return StacSource(years=years) if SOURCE == "pc" else LocalSource(SOURCE, years=years)
 
 
-source = _source(YEARS or None)
-cache = CellCache(DATA / "naip", source, gsd=GSD)
-s2_cache = CellCache(DATA / "sentinel2", Sentinel2Source() if S2_SOURCE == "pc" else LocalSource(S2_SOURCE), gsd=S2_GSD)
-caches = {"naip": cache, "sentinel2": s2_cache}
-sim_runs = SimRuns(DATA / "sim", caches, lambda year: CellCache(DATA / "naip", _source([year]), gsd=GSD), FETCH_THREADS)
+library = Library(DATA, _source, Sentinel2Source() if S2_SOURCE == "pc" else LocalSentinel2Source(S2_SOURCE), YEARS or None, GSD, S2_GSD)
+cache = library.default_naip
+source = cache.source
+sim_runs = SimRuns(DATA / "sim", library, FETCH_THREADS)
+
+
+def _viewed_cache(imagery: str, date: str | None = None) -> CellCache:
+    return library.clear(date) if imagery == "sentinel2" else cache
 
 
 @asynccontextmanager
@@ -87,8 +93,8 @@ def index():
 
 @app.get("/api/config")
 def config():
-    return {"gsd": GSD, "source": source.name, "s2_gsd": S2_GSD, "s2_source": s2_cache.source.name,
-            "data_dir": str(DATA), "simulator": simulator_available()}
+    return {"gsd": GSD, "source": source.name, "s2_gsd": S2_GSD, "s2_source": library.sentinel2.name,
+            "data_dir": str(DATA), "simulator": simulator_available(), "cloud_base_m": CLOUD_BASE_M}
 
 
 # Missions -----------------------------------------------------------------
@@ -125,7 +131,7 @@ def check_plan(mission: Mission):
         return {"warnings": ["Click the map to add waypoints."], "cells": 0, "cached": 0}
     _, poly_ll = mission.corridor()
     cells = mission.required_cells()
-    plan_cache = caches[mission.imagery]
+    plan_cache = sim_runs.plan_cache(mission)
     cached = sum(plan_cache.has(c) for c in cells)
     return {
         "length_m": round(mission.length_m(), 1),
@@ -148,11 +154,12 @@ def _naip_label(years) -> str:
     return "NAIP " + (", ".join(str(y) for y in sorted(years, reverse=True)) or "year unknown")
 
 
-def _s2_label(cells: list[Cell]) -> str:
-    """Sentinel-2 is a mosaic of recent passes, so say which months it spans."""
-    dates = sorted(s["date"] for c in cells for s in (s2_cache.meta(c) or {"scenes": []})["scenes"] if s.get("date"))
+def _s2_label(mission: Mission, cells: list[Cell]) -> str:
+    """Sentinel-2 is a mosaic of several passes, so say which months it spans."""
+    s2 = library.clear(mission.imagery_date)
+    dates = sorted(s["date"] for c in cells for s in (s2.meta(c) or {"scenes": []})["scenes"] if s.get("date"))
     if not dates:
-        return "Newest clear Sentinel-2"
+        return f"Clear Sentinel-2 as of {mission.imagery_date}" if mission.imagery_date else "Newest clear Sentinel-2"
     months = sorted({time.strftime("%b %Y", time.strptime(d[:7], "%Y-%m")) for d in (dates[0], dates[-1])},
                     key=lambda m: time.strptime(m, "%b %Y"))
     return "Sentinel-2 " + " to ".join(months)
@@ -187,7 +194,28 @@ def plan_imagery(mission: Mission):
             label = f"{_naip_label(cached)} cached, {newest} for the rest"
         else:
             label = _naip_label({newest})
-    return {"label": label if mission.imagery == "naip" else _s2_label(cells), "naip_here": naip_here}
+    return {"label": label if mission.imagery == "naip" else _s2_label(mission, cells), "naip_here": naip_here}
+
+
+@app.post("/api/sentinel2/passes")
+def sentinel2_passes(mission: Mission, year: int | None = None):
+    """Passes over the route, cloudy or not, in a year or the last 12 months, and what is stored for it already."""
+    if not mission.waypoints:
+        return {"passes": [], "years": [], "stored": {"clear": [], "passes": []}}
+    bbox = mission.corridor()[1].bounds
+    stored = library.stored(mission.required_cells())
+    try:
+        s2 = library.sentinel2
+        if year:
+            passes = s2.passes(bbox, f"{year}-01-01", f"{year}-12-31")
+        else:
+            passes = s2.passes(bbox, time.strftime("%Y-%m-%d", time.gmtime(time.time() - 365 * 86400)))
+        first = s2.first_year(bbox)
+        years = list(range(int(time.strftime("%Y")), first - 1, -1)) if first else []
+    except Exception as exc:  # noqa: BLE001  e.g. offline: what is stored can still be used
+        log.warning("cannot list Sentinel-2 passes: %s", exc)
+        passes, years = [{"date": d, "cloud_pct": None} for d in stored["passes"]], []
+    return {"passes": passes, "years": years, "stored": stored}
 
 
 @app.get("/api/missions/{name}/mission.waypoints", response_class=PlainTextResponse)
@@ -199,7 +227,7 @@ def export_wpl(name: str):
 def export_bundle(mission: Mission):
     if len(mission.waypoints) < 2:
         raise HTTPException(400, "need at least two waypoints")
-    plan_cache = caches[mission.imagery]
+    plan_cache = sim_runs.plan_cache(mission)
     missing = [c.key for c in mission.required_cells() if not plan_cache.has(c)]
     if missing:
         raise HTTPException(409, f"{len(missing)} imagery cells not cached yet; run 'Cache' first")
@@ -224,12 +252,26 @@ def _fetch_cell(job: dict, cell_cache: CellCache, cell: Cell):
             job["errors"].append(f"{cell.key}: {exc}")
 
 
-def _run_job(job_id: str, cell_cache: CellCache, cells: list[Cell]):
+def _keep_last_pass(job: dict, mission: Mission, route_cells: list[Cell], pool: ThreadPoolExecutor):
+    """Maps are clear of clouds, but simulated flights are not: keep the last pass as it was."""
+    try:
+        passes = library.sentinel2.passes(mission.corridor()[1].bounds, end=mission.imagery_date, limit=1)
+        if passes:
+            kept = library.on_date(passes[0]["date"])
+            list(pool.map(kept.fetch, [c for c in route_cells if not kept.has(c)]))
+            job["kept_pass"] = passes[0]["date"]
+    except Exception as exc:  # noqa: BLE001  the map is what was asked for, and flights can fetch this later
+        log.warning("could not keep the last Sentinel-2 pass: %s", exc)
+
+
+def _run_job(job_id: str, cell_cache: CellCache, cells: list[Cell], mission: Mission, route_cells: list[Cell]):
     job = _jobs[job_id]
     # Fetches are latency bound (NAIP on Planetary Computer is stored in West
     # Europe), so several cells in flight at once is much faster.
     with ThreadPoolExecutor(max_workers=FETCH_THREADS) as pool:
         list(pool.map(lambda c: _fetch_cell(job, cell_cache, c), cells))
+        if not job["cancel"]:
+            _keep_last_pass(job, mission, route_cells, pool)
     job["state"] = "cancelled" if job["cancel"] else "finished"
 
 
@@ -237,13 +279,13 @@ def _run_job(job_id: str, cell_cache: CellCache, cells: list[Cell]):
 def start_cache_job(mission: Mission):
     if not mission.waypoints:
         raise HTTPException(400, "no waypoints")
-    plan_cache = caches[mission.imagery]
+    plan_cache = sim_runs.plan_cache(mission)
     route_cells = mission.required_cells()
     cells = [c for c in route_cells if not plan_cache.has(c)]
     job_id = uuid.uuid4().hex[:8]
     _jobs[job_id] = {"id": job_id, "state": "running", "route_cells": len(route_cells), "total": len(cells), "done": 0,
-                     "errors": [], "no_coverage": [], "cancel": False}
-    _pool.submit(_run_job, job_id, plan_cache, cells)
+                     "errors": [], "no_coverage": [], "cancel": False, "kept_pass": None}
+    _pool.submit(_run_job, job_id, plan_cache, cells, mission, route_cells)
     return _jobs[job_id]
 
 
@@ -262,9 +304,9 @@ def cancel_job(job_id: str):
 
 
 @app.get("/api/cache/cells")
-def cached_cells(imagery: Imagery = "naip"):
+def cached_cells(imagery: Imagery = "naip", date: Date = None):
     feats = []
-    for meta in caches[imagery].cached_cells():
+    for meta in _viewed_cache(imagery, date).cached_cells():
         w, s, e, n = meta["bbox"]
         feats.append({
             "type": "Feature",
@@ -289,7 +331,7 @@ def sim_years(mission: Mission):
     if not mission.waypoints:
         return {"years": []}
     _, poly_ll = mission.corridor()
-    all_years = {scene.year for scene in _source().scenes(poly_ll.bounds) if scene.year}
+    all_years = {scene.year for scene in library.naip_source(None).scenes(poly_ll.bounds) if scene.year}
     # With a Sentinel-2 map every NAIP year is another imagery; with a NAIP map, its own year is not.
     used = _cached_years(mission.required_cells()) if mission.imagery == "naip" else set()
     return {"years": sorted(all_years - used, reverse=True)}
@@ -319,12 +361,17 @@ def _check_can_simulate(req: SimRequest):
     if len(req.mission.waypoints) < 2:
         raise HTTPException(400, "need at least two waypoints")
     from visnav.appearance import Appearance
+    from visnav.fog import Fog
 
     try:
         Appearance.from_dict(req.options.appearance)
     except ValueError as exc:
         raise HTTPException(422, f"camera appearance: {exc}") from exc
-    plan_cache = caches[req.mission.imagery]
+    try:
+        Fog.from_dict(req.options.fog)
+    except ValueError as exc:
+        raise HTTPException(422, f"fog: {exc}") from exc
+    plan_cache = sim_runs.plan_cache(req.mission)
     missing = [c.key for c in req.mission.required_cells() if not plan_cache.has(c)]
     if missing:
         raise HTTPException(409, f"{len(missing)} imagery cells not cached yet; run 'Cache' first")
@@ -460,10 +507,10 @@ def _tile_bounds_ll(z: int, x: int, y: int):
 
 
 @app.get("/api/tiles/{z}/{x}/{y}.png")
-def tile(z: int, x: int, y: int, imagery: Imagery = "naip"):
+def tile(z: int, x: int, y: int, imagery: Imagery = "naip", date: Date = None):
     if z < 12:
         return Response(_EMPTY_PNG, media_type="image/png", headers={"Cache-Control": "no-store"})
-    cache = caches[imagery]
+    cache = _viewed_cache(imagery, date)
     cells = [c for c in cells_for_bbox(*_tile_bounds_ll(z, x, y)) if cache.has(c)]
     if not cells:
         return Response(_EMPTY_PNG, media_type="image/png", headers={"Cache-Control": "no-store"})
@@ -484,9 +531,9 @@ def tile(z: int, x: int, y: int, imagery: Imagery = "naip"):
 
 
 @app.get("/api/cache/cells/{key}")
-def cell_meta(key: str, imagery: Imagery = "naip"):
+def cell_meta(key: str, imagery: Imagery = "naip", date: Date = None):
     iy, ix = (int(v) for v in key.split("_"))
-    meta = caches[imagery].meta(Cell(iy, ix))
+    meta = _viewed_cache(imagery, date).meta(Cell(iy, ix))
     if meta is None:
         raise HTTPException(404)
     return meta

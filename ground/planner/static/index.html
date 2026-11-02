@@ -22,12 +22,22 @@
     <section class="grid">
       <label title="Height above the first waypoint for every waypoint without its own altitude. Higher sees more ground, which makes map matching more reliable: with a 90 degree lens it only starts at about 60 m. The planner warns above 122 m (400 ft), the US Part 107 limit.">Cruise alt (m AGL) <input id="default_alt" type="number" value="120" min="5"></label>
       <label title="Height to climb to straight above the first waypoint before flying the route, in metres. Below about 60 m (with a 90 degree lens) the vehicle navigates on visual odometry alone, not the map.">Takeoff alt (m) <input id="takeoff_alt" type="number" value="30" min="5"></label>
+      <div class="wide clouds-row">
+        <span id="clouds_state" title="Whether simulated flights of this plan meet clouds. A camera below about 750 m is under the clouds, so by default it does not see them. The default changes with the highest altitude planned. A flight going higher only sees them while above 750 m, not on its climb and descent.">Clouds in simulation: not included</span>
+        <select id="sim_clouds" title="Change whether simulated flights include clouds. Automatic follows the altitude. Include shows them at every height, hiding the ground below them, with their shadows. Only shadows dims the ground below them, as a camera under the clouds would see. Exclude leaves them out. Maps are always made clear of clouds.">
+          <option value="auto">Automatic</option>
+          <option value="real">Include</option>
+          <option value="shadows">Only shadows</option>
+          <option value="none">Exclude</option>
+        </select>
+      </div>
       <label title="Cruise speed between waypoints. It sets the mission's speed and the time estimate. The built-in simulator flies at 10 m/s at most.">Speed (m/s) <input id="speed" type="number" value="10" min="1" step="0.5"></label>
       <label title="How far the imagery extends on each side of the route, so the whole band is twice this wide. Every NAIP cell the band touches is downloaded, and imagery outside it is left out of the mission's map, so the vehicle cannot match against the map if it drifts further. Wider means more cells to download and a bigger bundle.">Corridor half-width (m) <input id="corridor_m" type="number" value="400" min="50" step="50"></label>
       <label title="What the map the vehicle navigates by is made from. NAIP: 0.6 m aerial imagery, a year or more old, US only; matching works from about 60 m up with a 90 degree lens. Sentinel-2: 10 m satellite imagery from the last few weeks, worldwide, but its pixels are so coarse that matching only works from about 200 to 300 m up, above the US 120 m limit; lower down the flight runs on odometry alone." class="wide">Map imagery <select id="imagery">
         <option value="naip">NAIP (0.6 m aerial)</option>
         <option value="sentinel2">Sentinel-2 (10 m satellite)</option>
       </select></label>
+      <label id="imagery_date_box" class="wide" hidden title="Make the map from the newest clear imagery as of this date; blank for today. Clouds are left out, using earlier passes. Each date is stored separately, so you can keep several and switch between them.">Imagery as of <input id="imagery_date" type="date"></label>
       <label title="Horizontal field of view of the downward camera. With altitude it sets how wide a strip of ground each frame sees, which is shown below. Wide lenses, about 90 degrees, match the map best.">Camera HFOV (deg) <input id="hfov_deg" type="number" value="90" min="10" max="170"></label>
       <label title="What happens after the last waypoint. Return to launch: fly back to the first waypoint and land. Land at last WP: land there. Loiter / nothing: no landing is planned, and the vehicle stays in the air at the last waypoint.">End <select id="end_action">
         <option value="rtl">Return to launch</option>
@@ -48,6 +58,7 @@
 
     <section class="actions">
       <button id="cache" title="Download the chosen imagery's cells that the corridor touches, skipping any already on disk. A cell is 0.01 degrees square, about 1 km, and is kept for every mission that uses it."><span id="cache_name">Cache NAIP for route</span><small id="naip_years"></small></button>
+      <p id="s2_stored" class="hint" hidden></p>
       <div id="progress" class="progress" hidden><div id="bar" class="bar"></div><span id="ptext" class="ptext"></span></div>
       <button id="export" class="primary">Export mission bundle (.zip)</button>
       <button id="wpl" class="ghost">Download .waypoints only</button>
@@ -56,9 +67,10 @@
     <section id="simsec">
       <h2>Simulate <small>a GPS-denied flight of this route</small></h2>
       <div class="grid">
-        <label title="Imagery the simulated camera sees; the map the vehicle navigates by stays the same. The map's own imagery makes matching too easy, and with a Sentinel-2 map it also makes the camera far blurrier than a real one. NAIP from another year adds real changes in buildings, crops and light, so it is the fairer test. Other years are listed once the route is cached, and download once." class="wide">Camera imagery <select id="sim_world">
+        <label title="Imagery the simulated camera sees; the map the vehicle navigates by stays the same. The map's own imagery makes matching too easy, and with a Sentinel-2 map it also makes the camera far blurrier than a real one. NAIP from another year adds real changes in buildings, crops and light, so it is the fairer test. Sentinel-2 years use a pass as it was that day, but at 10 m a camera sees far less than a real one. Other years are listed once the route is cached, and download once." class="wide">Camera imagery <select id="sim_world">
           <option value="">Same imagery as the map (optimistic)</option>
         </select></label>
+        <label id="sim_pass_box" class="wide" title="Which Sentinel-2 pass gives the clouds, or the camera's imagery if that is Sentinel-2. By default the last one, or when a year is chosen one the random seed picks out of all of that year's, however cloudy, so that many seeds meet clouds as often as that year had them. Percentages are for the whole 110 km satellite tile, not just the route.">Sentinel-2 pass <select id="sim_pass"><option value="">Last pass</option></select></label>
         <label title="Steady wind speed during the simulated flight.">Wind (m/s) <input id="sim_wind" type="number" value="3" min="0" max="30" step="0.5"></label>
         <label title="Compass direction the wind blows from: 0 is north, 90 east, 180 south, 270 west.">Wind from (deg) <input id="sim_wind_from" type="number" value="300" min="0" max="360" step="10"></label>
         <label title="Strength of the random gusts on top of the steady wind (standard deviation).">Gusts (m/s) <input id="sim_gust" type="number" value="1.5" min="0" max="15" step="0.5"></label>
@@ -74,6 +86,26 @@
           <option value="1">Real time</option>
         </select></label>
       </div>
+      <div class="row" id="fog_bar">
+        <label title="Fog in the simulated camera's frames, at any altitude: a layer of air from the ground up, which fades the ground and replaces it with the fog's own light, the more the longer the camera's line of sight through it. Off by default. Each choice fills in the values under Adjust fog.">Fog <select id="sim_fog">
+          <option value="">None</option>
+          <option value="haze">Haze (5 km)</option>
+          <option value="mist">Mist (1.5 km)</option>
+          <option value="fog">Fog (400 m)</option>
+          <option value="dense">Dense fog (100 m)</option>
+          <option value="custom">Custom</option>
+        </select></label>
+      </div>
+      <details id="fog_box" hidden>
+        <summary>Adjust fog</summary>
+        <div class="grid">
+          <label title="Meteorological visibility in the fog: the distance at which contrast falls to 2%. Under 1000 m is fog, up to 5000 m mist, more than that haze.">Visibility (m) <input data-fog="visibility" type="number" value="400" min="10" max="100000" step="50"></label>
+          <label title="Height of the top of the layer above the ground. A camera inside looks through all of its own height of fog, one above the layer through this depth.">Top of layer (m) <input data-fog="top" type="number" value="200" min="1" max="20000" step="50"></label>
+          <label title="0 for even fog, 1 for thick banks and clear holes.">Patchiness (0 to 1) <input data-fog="patchiness" type="number" value="0.4" min="0" max="1" step="0.1"></label>
+          <label title="Typical size of the patches on the ground. They drift with the steady wind.">Patch size (m) <input data-fog="patch" type="number" value="300" min="5" max="20000" step="50"></label>
+          <label title="Brightness of the fog's own light, from 0 to 1. Thick fog fades to this.">Brightness (0 to 1) <input data-fog="brightness" type="number" value="0.8" min="0" max="1" step="0.05"></label>
+        </div>
+      </details>
       <div class="row" id="look_bar">
         <span title="How the simulated camera's picture differs from the imagery, as a stand-in for lighting, season and sensor differences. By default it does not.">Camera appearance <small id="look_state">as the imagery</small></span>
         <button id="look_random" title="Realistic stand-in for differences in lighting, season and sensor">Randomize</button>
@@ -99,7 +131,7 @@
         </div>
       </details>
       <button id="sim_run" class="primary" disabled>Run simulation</button>
-      <button id="sim_compare" disabled title="Fly this route twice with the same settings and seed, with map matching and on visual odometry alone, and show the two side by side. The Navigation setting above is ignored.">Compare with and without map matching</button>
+      <button id="sim_compare" disabled title="Fly this route twice with the same settings, seed and clouds, with map matching and on visual odometry alone, and show the two side by side. The Navigation setting above is ignored.">Compare with and without map matching</button>
       <div id="sim_progress" class="progress" hidden><div id="sim_bar" class="bar"></div><span id="sim_ptext" class="ptext"></span></div>
       <p id="sim_result"></p>
       <div class="row">

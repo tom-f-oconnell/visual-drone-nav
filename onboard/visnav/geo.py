@@ -20,17 +20,19 @@ class MapRaster:
     valid: np.ndarray      # H x W bool
     transform: rasterio.Affine
     crs: str
+    cloud: np.ndarray | None = None  # H x W uint8 opacity of clouds laid over simulated imagery, if any
 
     @classmethod
     def load(cls, path: str | Path) -> "MapRaster":
         with rasterio.open(path) as src:
             data = src.read([1, 2, 3])
+            cloud = src.read(4) if src.count >= 4 else None
             transform, crs = src.transform, src.crs.to_string()
         rgb = np.ascontiguousarray(np.moveaxis(data, 0, -1))
         valid = rgb.any(axis=2)
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(16, 16)).apply(gray)
-        return cls(rgb, gray, valid, transform, crs)
+        return cls(rgb, gray, valid, transform, crs, cloud)
 
     def __post_init__(self):
         self._to_map = Transformer.from_crs("EPSG:4326", self.crs, always_xy=True)

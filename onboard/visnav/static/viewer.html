@@ -49,6 +49,7 @@ button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-co
 button:focus-visible, input:focus-visible { outline: 2px solid var(--est); outline-offset: 2px; }
 #transport { left: 50%; transform: translateX(-50%); bottom: calc(12px + env(safe-area-inset-bottom, 0px)); width: min(760px, calc(100% - 24px)); padding: 8px 12px; display: flex; align-items: center; gap: 10px; }
 #play { width: 64px; }
+#jump { white-space: nowrap; }
 #scrub { flex: 1; min-width: 0; accent-color: var(--est); }
 #clock { font: 12px var(--mono); font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
 #speed { display: flex; gap: 3px; }
@@ -76,6 +77,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--est); outli
     <dt>Heading</dt><dd id="hdg">–</dd>
     <dt>Position error</dt><dd id="err">–</dd>
     <dt>Leg</dt><dd id="leg">–</dd>
+    <dt id="skyname" hidden>Clouds</dt><dd id="sky" hidden>–</dd>
+    <dt id="fogname" hidden>Fog</dt><dd id="fogtext" hidden>–</dd>
   </dl>
   <div id="sparkbox">
     <canvas id="spark"></canvas>
@@ -124,6 +127,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--est); outli
 
 <div id="transport" class="panel">
   <button id="play">Pause</button>
+  <button id="jump" title="Centre the view on the drone where it is now, and keep following it">Jump to drone</button>
   <input id="scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Flight time">
   <span id="clock">0:00 / 0:00</span>
   <div id="speed" role="group" aria-label="Playback speed">
@@ -176,7 +180,7 @@ const sun = new THREE.DirectionalLight(0xffffff, 0.6); sun.position.set(300, 800
 // ENU metres -> three: x = east, y = up, z = -north
 const V = (e, n, u) => new THREE.Vector3(e, u, -n);
 let drone, truthLine, estLine, fixPts, footprint, frustum, dropLine, S;
-let windArrows = null, windScale = 5, windNow = null;
+let windArrows = null, windScale = 5, windNow = null, cloudLayer = null;
 const MAXP = 20000;
 
 function lineGeom(n) {
@@ -233,6 +237,19 @@ function build(info, mapUrl) {
   dropLine.geometry.setDrawRange(0, 2);
   [footprint, frustum, dropLine].forEach((o) => { o.frustumCulled = false; world.add(o); });
 
+  if (info.fog) {
+    $("fogname").hidden = $("fogtext").hidden = false;
+    $("fogtext").textContent = `${info.fog.visibility} m to ${info.fog.top} m up`;
+  }
+  if (info.clouds) {
+    const [cw, cs, ce, cn] = info.clouds.extent;
+    cloudLayer = new THREE.Mesh(new THREE.PlaneGeometry(ce - cw, cn - cs), new THREE.MeshBasicMaterial({
+      map: new THREE.TextureLoader().load(info.clouds.image), transparent: true, depthWrite: false }));
+    cloudLayer.rotation.x = -Math.PI / 2;
+    cloudLayer.position.set((cw + ce) / 2, 1.5, -(cs + cn) / 2);
+    world.add(cloudLayer);
+    $("skyname").hidden = $("sky").hidden = false;
+  }
   if (info.wind) {
     $("wind").hidden = false;
     document.querySelectorAll(".windkey").forEach((el) => { el.hidden = false; });
@@ -443,6 +460,10 @@ function update() {
   $("spd").textContent = `${v.toFixed(1)} m/s`;
   $("hdg").textContent = `${((r.att[2] * 180 / Math.PI + 360) % 360).toFixed(0).padStart(3, "0")}°`;
   $("err").textContent = `${errOf(r).toFixed(1)} m`;
+  if (cloudLayer) {  // below the cloud base they are overhead, so neither the camera nor this view shows them
+    cloudLayer.visible = p[2] >= S.clouds.base_m;
+    $("sky").textContent = cloudLayer.visible ? "in view" : `overhead, base ${S.clouds.base_m.toFixed(0)} m`;
+  }
   const legs = S.plan.length;
   $("leg").textContent = `${Math.min(r.leg + 1, legs)} / ${legs} ${S.plan[Math.min(r.leg, legs - 1)].kind}`;
   const chip = $("navchip");
@@ -483,6 +504,8 @@ function drawSpark() {
 }
 
 // ---------- Camera control: orbit, chase, top ----------
+// How far up from the ground to the drone the orbit view aims: halfway keeps both in view, until asked for the drone itself.
+let aimHeight = 0.5;
 const view = { mode: "orbit", target: new THREE.Vector3(), dist: 1200, az: -0.6, el: 0.6,
                yaw: 0, offset: new THREE.Vector3(), aim: new THREE.Vector3() };
 function placeCamera(dt) {
@@ -500,7 +523,7 @@ function placeCamera(dt) {
     return;
   }
   if (view.mode === "top") { view.el = 1.5; }
-  if (follow) view.target.lerp(new THREE.Vector3(d.x, d.y * 0.5, d.z), 0.05);
+  if (follow) view.target.lerp(new THREE.Vector3(d.x, d.y * aimHeight, d.z), 0.05);
   const c = Math.cos(view.el);
   camera.position.set(view.target.x + view.dist * c * Math.sin(view.az), view.target.y + view.dist * Math.sin(view.el),
                       view.target.z + view.dist * c * Math.cos(view.az));
@@ -543,6 +566,13 @@ cv.addEventListener("pointermove", (e) => {
 });
 cv.addEventListener("wheel", (e) => { e.preventDefault(); view.dist = Math.min(8000, Math.max(60, view.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
 cv.addEventListener("dblclick", () => { follow = true; });
+$("jump").onclick = () => {
+  if (!drone) return;
+  follow = true;
+  aimHeight = 1;
+  view.target.copy(drone.position);
+  view.dist = Math.min(view.dist, 400);
+};
 
 // ---------- Transport ----------
 let scrubbing = false;

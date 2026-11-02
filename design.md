@@ -227,8 +227,9 @@ Sentinel-2 from October 2026, over suburbs, farmland and foothills, with 1° att
 | 500 m | 100 x 63 | 98% | 14 m | 1 |
 
 Closed-loop `sim3d` flights of 2.5 km, the same three sites, two seeds each, with a
-2° compass bias and the camera seeing NAIP. "Fixes" counts all frames above 25 m, so
-it includes the climb and descent, below where a coarse map can match:
+2° compass bias and the camera seeing NAIP, which for the NAIP row is the map's own
+imagery, so that row is optimistic. "Fixes" counts all frames above 25 m, so it includes
+the climb and descent, below where a coarse map can match:
 
 | map, height | median | p95 | error at the end | fixes |
 |---|---|---|---|---|
@@ -259,6 +260,35 @@ it includes the climb and descent, below where a coarse map can match:
   worse. Cells stay as first downloaded; delete `data/sentinel2/` to refresh them.
 * A cell takes about 0.03 MB against about 5 MB for NAIP, and a 20-cell route about
   17 s against 50 s to download.
+
+## Weather in simulated flights
+
+Maps are made clear of clouds, but flights happen under whatever the sky is doing.
+
+**Clouds.** Sentinel-2 passes are stored as they were, with their scene classification
+(`PassSource`), apart from the clear composites maps use. `planner/clouds.py` lays one
+pass over the camera's imagery: clouds hide the ground, by class (high probability 100%,
+medium 85%, thin cirrus 35%) using the pass's own pixels, and shadows dim it to 55%. That
+puts real cloud shapes on sharp NAIP, as a 10 m camera could not test a 120 m flight. An
+opacity band keeps the simulator's fine ground texture off the clouds. Choosing a year
+picks a pass by the seed from all of that year's, so many seeds meet clouds as often as
+that year had them. By default a camera below 750 m sees none, as it is under them,
+and one going higher sees them only while above that (`--clear-world`, `--cloud-base`).
+Tile cloud percentages say little about a route: a 55% tile was 99.7% over one route.
+Clouds are frozen for the flight, and the base is one fixed height. They are painted on
+the ground, so nothing is seen below them even from above 750 m, and their parallax and
+drift are not modelled.
+
+**Fog** (`onboard/visnav/fog.py`) is a layer from the ground to a top height, applied to
+each frame by Koschmieder's law: `seen = ground * T + light * (1 - T)` with
+`T = exp(-beta * density * path)`. `beta` is `3.912 / visibility`, by the definition of
+visibility as where contrast falls to 2%. `path` is the ray's length in the layer,
+`min(height, top) / cos(angle from straight down)`, so it works at any height and frame
+edges are foggier. `density` varies by fractal noise sampled where each ray meets the
+ground, drifting with the steady wind, for banks and holes. It is traced on a grid of
+rays every 16 pixels and interpolated. Density does not vary with height, slant paths
+take the density of where they land, and fog also fades clouds, which at those heights
+would be above it. This is a best guess, not fitted to real fog imagery.
 
 ## Matcher benchmark (`bench/`)
 

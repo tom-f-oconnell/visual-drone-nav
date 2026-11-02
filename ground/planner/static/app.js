@@ -13,7 +13,9 @@ const IMAGERY = {
   naip: { label: "NAIP", maxNativeZoom: 18, attribution: "USDA NAIP (cached)" },
   sentinel2: { label: "Sentinel-2", maxNativeZoom: 16, attribution: "Copernicus Sentinel-2 (cached)" },
 };
-const imageryUrl = (name, v) => `/api/tiles/{z}/{x}/{y}.png?imagery=${name}&v=${v}`;
+const planDate = () => ($("imagery").value === "sentinel2" && $("imagery_date").value) || null;
+const dateQuery = (name) => (name === "sentinel2" && planDate() ? `&date=${planDate()}` : "");
+const imageryUrl = (name, v) => `/api/tiles/{z}/{x}/{y}.png?imagery=${name}${dateQuery(name)}&v=${v}`;
 const imageryLayers = Object.fromEntries(Object.entries(IMAGERY).map(([name, i]) => [name,
   L.tileLayer(imageryUrl(name, 0), { minZoom: 12, maxZoom: 20, maxNativeZoom: i.maxNativeZoom, attribution: i.attribution })]));
 const cellsLayer = L.geoJSON(null, { style: { color: "#888", weight: 1, fill: false, dashArray: "2 3" } });
@@ -52,7 +54,7 @@ let wps = [];  // {lat, lon, alt|null, hold_s}
 function mission() {
   const m = {
     name: $("name").value, waypoints: wps, end_action: $("end_action").value,
-    camera: { hfov_deg: +$("hfov_deg").value }, imagery: $("imagery").value,
+    camera: { hfov_deg: +$("hfov_deg").value }, imagery: $("imagery").value, imagery_date: planDate(),
   };
   FIELDS.forEach((f) => (m[f] = +$(f).value));
   return m;
@@ -64,6 +66,9 @@ function loadMission(m) {
   $("end_action").value = m.end_action;
   $("hfov_deg").value = m.camera.hfov_deg;
   $("imagery").value = m.imagery || "naip";
+  $("imagery_date").value = m.imagery_date || "";
+  $("imagery_date_box").hidden = $("imagery").value !== "sentinel2";
+  imageryLayers.sentinel2.setUrl(imageryUrl("sentinel2", 0));
   showImagery($("imagery").value);
   wps = m.waypoints;
   redraw();
@@ -104,7 +109,14 @@ function renderList() {
 map.on("click", (e) => { wps.push({ lat: e.latlng.lat, lon: e.latlng.lng, alt: null, hold_s: 0 }); redraw(); });
 $("clear").onclick = () => { wps = []; redraw(); };
 [...FIELDS, "hfov_deg", "end_action"].forEach((f) => ($(f).onchange = check));
-$("imagery").onchange = () => { showImagery($("imagery").value); check(); };
+function planImageryChanged() {
+  $("imagery_date_box").hidden = $("imagery").value !== "sentinel2";
+  imageryLayers.sentinel2.setUrl(imageryUrl("sentinel2", 0));
+  showImagery($("imagery").value);
+  check();
+}
+$("imagery").onchange = planImageryChanged;
+$("imagery_date").onchange = planImageryChanged;
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
@@ -114,6 +126,7 @@ async function api(path, opts = {}) {
 
 let checkTimer, routeCached = false, routeCells = "";
 function check() {
+  showCloudState();
   clearTimeout(checkTimer);
   checkTimer = setTimeout(async () => {
     const res = await (await api("/api/plan/check", { method: "POST", body: JSON.stringify(mission()) })).json();
@@ -133,13 +146,39 @@ function check() {
   }, 250);
 }
 
+// Whether simulated flights meet clouds by default follows the plan's altitude, and the control beside this can override it.
+let cloudBase = 750, cloudDefault = null;
+const flightMeetsClouds = () => Math.max(+$("default_alt").value, +$("takeoff_alt").value,
+  ...wps.map((w) => (w.alt === null || w.alt === undefined ? +$("default_alt").value : w.alt))) >= cloudBase;
+
+function cloudsInFlight() {
+  const choice = $("sim_clouds").value;
+  return choice === "auto" ? (flightMeetsClouds() ? "real" : "none") : choice;
+}
+
+function showCloudState() {
+  const high = flightMeetsClouds(), state = $("clouds_state");
+  const byDefault = high ? `included above ${cloudBase} m` : `not included below ${cloudBase} m`;
+  const chosen = { real: "included at every height", shadows: "only their shadows", none: "not included" }[$("sim_clouds").value];
+  state.textContent = chosen ? `Clouds in simulation: ${chosen} (default here: ${byDefault})` : `Clouds in simulation: ${byDefault}`;
+  if (cloudDefault !== null && cloudDefault !== high) {
+    state.classList.remove("changed");
+    void state.offsetWidth;  // restarts the animation
+    state.classList.add("changed");
+  }
+  cloudDefault = high;
+  $("sim_pass_box").hidden = cloudsInFlight() === "none" && worldChoice().world_imagery === "naip";
+}
+$("default_alt").oninput = showCloudState;
+$("takeoff_alt").oninput = showCloudState;
+
 // What imagery the route uses, and whether NAIP covers it. The server may have to ask the imagery
 // source, so only when the route's cells change.
 let imageryKey = null;
 async function refreshImagery(cached) {
   const plan = $("imagery");
   $("cache_name").textContent = `Cache ${IMAGERY[plan.value].label} for route`;
-  const key = `${routeCells}/${cached}/${plan.value}`;
+  const key = `${routeCells}/${cached}/${plan.value}/${planDate()}`;
   if (key === imageryKey) return;
   imageryKey = key;
   try {
@@ -152,8 +191,7 @@ async function refreshImagery(cached) {
     $("imagery_note").textContent = "There is no NAIP here, so this plan uses Sentinel-2.";
     if (naip_here === false && plan.value === "naip") {
       plan.value = "sentinel2";
-      showImagery("sentinel2");
-      check();
+      planImageryChanged();
     }
   } catch (e) { imageryKey = null; console.warn(e); }
 }
@@ -184,6 +222,7 @@ $("cache").onclick = async () => {
       : job.total ? `Downloaded ${job.total} new, ${kept} already cached` : `All ${kept} cells already cached`;
     refreshCells();
     check();
+    refreshPasses(true);
   } catch (e) { alert(e.message); }
   $("cache").disabled = false;
 };
@@ -227,7 +266,7 @@ async function refreshSaved() {
 
 async function refreshCells() {
   cellsLayer.clearLayers();
-  if (shownImagery) cellsLayer.addData(await (await api(`/api/cache/cells?imagery=${shownImagery}`)).json());
+  if (shownImagery) cellsLayer.addData(await (await api(`/api/cache/cells?imagery=${shownImagery}${dateQuery(shownImagery)}`)).json());
 }
 
 // Simulation: runs execute on the server, the 3D viewer of each is shown in an iframe.
@@ -262,17 +301,62 @@ async function refreshYears() {
   if (key === yearsKey) return;
   yearsKey = key;
   try {
-    const { years } = await (await api("/api/sim/years", { method: "POST", body: JSON.stringify(mission()) })).json();
+    const body = JSON.stringify(mission());
+    const [{ years }, s2] = await Promise.all([
+      api("/api/sim/years", { method: "POST", body }).then((r) => r.json()),
+      api("/api/sentinel2/passes", { method: "POST", body }).then((r) => r.json()),
+    ]);
     if (key !== yearsKey) return;
     const sel = $("sim_world"), keep = sel.value;
     while (sel.options.length > 1) sel.remove(1);
     // A camera seeing 10 m imagery from 120 m would be far blurrier than a real one, so NAIP is the default there.
     if (satellite && years.length) sel.add(new Option("Newest NAIP (realistic, downloads it if needed)", "newest"));
     years.forEach((y) => sel.add(new Option(`NAIP ${y} (realistic, downloads it if needed)`, y)));
+    if (s2.years.length) sel.add(new Option("Sentinel-2, last pass (blurry for a camera)", "s2:newest"));
+    s2.years.forEach((y) => sel.add(new Option(`Sentinel-2 ${y} (blurry for a camera)`, `s2:${y}`)));
     sel.value = keep || (satellite && years.length ? "newest" : "");
     if (sel.selectedIndex < 0) sel.value = satellite && years.length ? "newest" : "";
+    refreshPasses(true);
   } catch (e) { yearsKey = null; console.warn(e); }
 }
+
+function worldChoice() {
+  const value = $("sim_world").value, satellite = value.startsWith("s2:");
+  const year = value.replace("s2:", "");
+  return { world_imagery: satellite ? "sentinel2" : "naip", world_year: year === "newest" ? "newest" : year ? +year : null };
+}
+
+// The passes a flight could use: a chosen year's, or the last 12 months'.
+let passesKey = null;
+async function refreshPasses(force) {
+  const { world_imagery, world_year } = worldChoice();
+  const year = Number.isInteger(world_year) ? world_year : null;
+  const key = `${routeCells}/${year}`;
+  $("sim_pass_box").hidden = cloudsInFlight() === "none" && world_imagery === "naip";
+  if (key === passesKey && !force) return;
+  passesKey = key;
+  try {
+    const url = `/api/sentinel2/passes${year ? `?year=${year}` : ""}`;
+    const { passes, stored } = await (await api(url, { method: "POST", body: JSON.stringify(mission()) })).json();
+    if (key !== passesKey) return;
+    const sel = $("sim_pass"), keep = sel.value;
+    while (sel.options.length) sel.remove(0);
+    const newest = passes[0];
+    const auto = year ? (passes.length ? `Picked by the seed, from ${passes.length} that year` : "None that year, so no clouds")
+      : newest ? `Last pass (${newest.date})` : "None found, so no clouds";
+    sel.add(new Option(auto, ""));
+    passes.forEach((p) => sel.add(new Option(`${p.date}${p.cloud_pct === null ? "" : `, ${p.cloud_pct}% cloud`}${stored.passes.includes(p.date) ? ", stored" : ""}`, p.date)));
+    sel.value = keep;
+    if (sel.selectedIndex < 0) sel.value = "";
+    const parts = [];
+    if (stored.clear.length) parts.push(`clear ${stored.clear.join(", ")}`);
+    if (stored.passes.length) parts.push(`with clouds ${stored.passes.join(", ")}`);
+    $("s2_stored").hidden = !parts.length;
+    $("s2_stored").textContent = `Sentinel-2 stored for this route: ${parts.join("; ")}.`;
+  } catch (e) { passesKey = null; console.warn(e); }
+}
+$("sim_world").onchange = () => refreshPasses();
+$("sim_clouds").onchange = () => { showCloudState(); refreshPasses(); };
 
 // Camera appearance: each field's value in the page is the one that changes nothing.
 const lookInputs = [...document.querySelectorAll("[data-look]")];
@@ -303,14 +387,35 @@ $("look_random").onclick = async () => {
   } catch (e) { alert(e.message); }
 };
 
+// Fog: each choice fills in the values, and changing a value makes it Custom.
+const FOG_PRESETS = {
+  haze: { visibility: 5000, top: 1500, patchiness: 0.2, patch: 2000, brightness: 0.75 },
+  mist: { visibility: 1500, top: 400, patchiness: 0.3, patch: 800, brightness: 0.8 },
+  fog: { visibility: 400, top: 200, patchiness: 0.4, patch: 300, brightness: 0.8 },
+  dense: { visibility: 100, top: 150, patchiness: 0.5, patch: 200, brightness: 0.85 },
+};
+const fogInputs = [...document.querySelectorAll("[data-fog]")];
+
+function fogValues() {
+  if (!$("sim_fog").value) return {};
+  return Object.fromEntries(fogInputs.map((el) => [el.dataset.fog, +el.value]));
+}
+
+$("sim_fog").onchange = () => {
+  const preset = FOG_PRESETS[$("sim_fog").value];
+  if (preset) fogInputs.forEach((el) => { el.value = preset[el.dataset.fog]; });
+  $("fog_box").hidden = !$("sim_fog").value;
+};
+fogInputs.forEach((el) => { el.oninput = () => { $("sim_fog").value = "custom"; }; });
+
 function simRequest() {
   return JSON.stringify({
     mission: mission(),
     options: {
       seed: +$("sim_seed").value, wind_speed: +$("sim_wind").value, wind_from_deg: +$("sim_wind_from").value,
       gust: +$("sim_gust").value, realtime: +$("sim_pace").value,
-      world_year: $("sim_world").value === "newest" ? "newest" : $("sim_world").value ? +$("sim_world").value : null,
-      appearance: lookValues(), navigation: $("sim_nav").value,
+      ...worldChoice(), clouds: $("sim_clouds").value, pass_date: $("sim_pass").value || null,
+      appearance: lookValues(), fog: fogValues(), navigation: $("sim_nav").value,
       compass_bias_deg: +$("sim_compass").value, height_bias_pct: +$("sim_height").value,
     },
   });
@@ -399,7 +504,7 @@ function renderRun(run) {
     let frac = 0, text = "Building the map…";
     if (run.state === "fetching" && run.cells) {
       frac = run.cells.total ? run.cells.done / run.cells.total : 1;
-      text = `Downloading ${worldName(run.options.world_year)}: ${run.cells.done} / ${run.cells.total} cells`;
+      text = `Downloading ${run.fetching}: ${run.cells.done} / ${run.cells.total} cells`;
     } else if (run.state === "running") {
       text = "Starting the simulator…";
       if (run.progress) {
@@ -413,7 +518,21 @@ function renderRun(run) {
   $("sim_result").textContent = active ? "" : resultText(run);
 }
 
-const worldName = (year) => (year === "newest" ? "the newest NAIP" : `NAIP ${year}`);
+function worldName({ world_imagery: imagery, world_year: year }) {
+  if (imagery === "sentinel2") return year === "newest" ? "the last Sentinel-2 pass" : `Sentinel-2 from ${year}`;
+  return year === "newest" ? "the newest NAIP" : `NAIP ${year}`;
+}
+
+function skyText(run) {
+  const w = run.world;
+  if (!w) return "";
+  if (w.note) return ` ${w.note}`;
+  if (w.clouds === "none") return w.choice === "auto" ? ` No clouds, as the flight stays below ${cloudBase} m.` : " No clouds.";
+  const where = w.base_m ? `, seen above ${w.base_m} m` : "";
+  const what = w.clouds === "real" ? `${w.cloud_pct}% of the route under cloud${where}, ${w.shadow_pct}% in shadow`
+    : `${w.shadow_pct}% of the route in shadow, as seen from below the clouds`;
+  return ` Sky from the Sentinel-2 pass of ${w.pass_date}: ${what}.`;
+}
 
 function resultText(run) {
   if (run.state === "failed") return `Failed: ${run.error}`;
@@ -423,8 +542,9 @@ function resultText(run) {
     : s.mission_complete ? `Reached the last waypoint, ${s.landing_error_m} m off.` : "Ran out of time before finishing.";
   const alone = run.options.navigation === "odometry";
   const note = (run.imagery === "sentinel2" ? "Map from Sentinel-2. " : "") +
-    (run.options.world_year ? `Camera saw ${worldName(run.options.world_year)}.`
-    : alone ? "" : "The camera saw the map's own imagery, so this is optimistic.") +
+    (run.options.world_year ? `Camera saw ${worldName(run.options)}.`
+    : alone ? "" : "The camera saw the map's own imagery, so this is optimistic.") + skyText(run) +
+    (s.fog ? ` Fog: ${s.fog.visibility} m visibility, up to ${s.fog.top} m.` : "") +
     (s.compass_bias_deg ? ` Compass bias ${s.compass_bias_deg}°.` : "") + (s.height_bias_pct ? ` Height bias ${s.height_bias_pct}%.` : "");
   const look = Object.entries(s.appearance || {}).map(([name, v]) => `${name.replace(/_/g, " ")} ${v}`).join(", ");
   return `${end} Position error: median ${s.ekf_err_median_m} m, 95% ${s.ekf_err_p95_m} m, ` +
@@ -465,6 +585,8 @@ async function refreshRuns() {
   const cfg = await (await api("/api/config")).json();
   $("cfg").textContent = `NAIP: ${cfg.source}, ${cfg.gsd} m. Sentinel-2: ${cfg.s2_source}, ${cfg.s2_gsd} m. Data in ${cfg.data_dir}`;
   simulator = cfg.simulator;
+  cloudBase = cfg.cloud_base_m;
+  document.querySelector(".clouds-row").hidden = !simulator;
   $("simsec").hidden = !simulator;
   $("sim_missing").hidden = simulator;
   refreshSaved();

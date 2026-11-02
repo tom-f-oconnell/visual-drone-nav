@@ -34,18 +34,21 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
+import numpy as np
 from pydantic import BaseModel, Field
 
+from .clouds import overlay
+from .imagery import CellCache, Library
 from .mission import Mission, build_map, write_bundle
-from .imagery import CellCache
 
 log = logging.getLogger(__name__)
 MAX_RUNNING = 3
 ACTIVE_STATES = ("preparing", "fetching", "running")
 RUN_ID = re.compile(r"[0-9a-f]{8}")
 TAIL_BYTES = 1 << 18  # longer than any one record, thumbnail included
+CLOUD_BASE_M = 750.0  # by default a camera below this sees no clouds, as it is under them
 SERIES_POINTS = 600  # of a flight, for the comparison page's charts
 
 
@@ -64,9 +67,16 @@ class SimOptions(BaseModel):
     wind_from_deg: float = Field(300.0, ge=0, le=360, description="direction the wind blows from")
     gust: float = Field(1.5, ge=0, le=15, description="m/s")
     realtime: float = Field(0.0, ge=0, le=100, description="multiple of real time, 0 for as fast as possible")
-    world_year: int | Literal["newest"] | None = Field(None, description="render the camera from this NAIP year, or the newest "
-                                                       "NAIP as cached for maps, instead of from the map")
+    world_imagery: Literal["naip", "sentinel2"] = Field("naip", description="what world_year means")
+    world_year: int | Literal["newest"] | None = Field(None, description="render the camera from this year, or the newest "
+                                                       "imagery, instead of from the map")
+    clouds: Literal["auto", "real", "shadows", "none"] = Field("auto", description="clouds from a Sentinel-2 pass: auto shows them "
+                                                               "only while above CLOUD_BASE_M; real at every height, hiding and "
+                                                               "dimming the ground; shadows only dimming it; or none")
+    pass_date: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="the pass; by default the last, or within "
+                                  "world_year one the seed picks out of all of them, however cloudy")
     appearance: dict[str, float] = Field(default_factory=dict, description="visnav.appearance.Appearance fields to change")
+    fog: dict[str, float] = Field(default_factory=dict, description="visnav.fog.Fog fields, or empty for no fog")
     navigation: Literal["map", "odometry"] = Field("map", description="odometry alone never looks at the saved imagery")
     compass_bias_deg: float = Field(0.0, ge=-45, le=45, description="heading error lasting the whole flight")
     height_bias_pct: float = Field(0.0, ge=-50, le=50, description="height error lasting the whole flight")
@@ -82,18 +92,18 @@ class SimRuns:
 
     Args:
         root: directory holding one subdirectory per run.
-        caches: the imagery caches maps are built from, by Mission.imagery.
-        year_cache: returns the NAIP cache of one year, for world_year.
-        fetch_threads: cells downloaded in parallel for world_year.
+        library: the imagery caches.
+        fetch_threads: cells downloaded in parallel for the camera's imagery.
     """
 
-    def __init__(self, root: Path, caches: dict[str, CellCache], year_cache: Callable[[int], CellCache], fetch_threads: int = 6):
-        self.root, self.caches, self.year_cache = root, caches, year_cache
+    def __init__(self, root: Path, library: Library, fetch_threads: int = 6):
+        self.root, self.library = root, library
         self.fetch_threads = fetch_threads
         self.root.mkdir(parents=True, exist_ok=True)
         self._live: dict[str, dict] = {}  # in-memory state of runs this process is executing
         self._lock = threading.Lock()
         self._download_lock = threading.Lock()  # the two runs of a comparison need the same cells
+        self.clear_worlds: dict[str, tuple[Path, float]] = {}  # by run, from _build_world to its command line
 
     def dir(self, run_id: str) -> Path | None:
         """The run's directory, or None if there is no such run."""
@@ -115,6 +125,7 @@ class SimRuns:
             (d / "run.json").write_text(json.dumps({
                 "id": run_id, "name": mission.name, "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "options": options.model_dump(), "partner": partner, "imagery": mission.imagery,
+                "imagery_date": mission.imagery_date,
             }))
             thread.start()
 
@@ -135,7 +146,7 @@ class SimRuns:
         d, live = self.root / run_id, self._live[run_id]
         bundle = d / "bundle"
         try:
-            write_bundle(mission, self.caches[mission.imagery], bundle)
+            write_bundle(mission, self.plan_cache(mission), bundle)
             cmd = [sys.executable, "-m", "visnav.main", "sim3d", "--bundle", str(bundle), "--port", "0", "--exit",
                    "--run-dir", str(d), "--seed", str(options.seed), "--gust", str(options.gust),
                    "--realtime", str(options.realtime)]
@@ -147,8 +158,14 @@ class SimRuns:
                 cmd += ["--matcher", "none"]
             if options.appearance:
                 cmd += ["--appearance", ",".join(f"{k}={v}" for k, v in options.appearance.items())]
-            if options.world_year:
-                cmd += ["--world", str(self._build_world(mission, options.world_year, bundle, live))]
+            if options.fog:
+                cmd += ["--fog", ",".join(f"{k}={v}" for k, v in options.fog.items())]
+            world = self._build_world(mission, options, bundle, live, d)
+            if world:
+                cmd += ["--world", str(world)]
+            below = self.clear_worlds.pop(run_id, None)
+            if below:
+                cmd += ["--clear-world", str(below[0]), "--cloud-base", str(below[1])]
             with self._lock:
                 if live["cancel"]:
                     return
@@ -169,10 +186,12 @@ class SimRuns:
             with self._lock:
                 self._live.pop(run_id, None)
 
-    def _build_world(self, mission: Mission, year: int | str, bundle: Path, live: dict) -> Path:
-        """Mosaic the corridor from one NAIP year or the newest, downloading the cells that are not cached."""
-        cache = self.caches["naip"] if year == "newest" else self.year_cache(year)
+    def plan_cache(self, mission: Mission) -> CellCache:
+        """The cache a plan's map is built from."""
+        return self.library.clear(mission.imagery_date) if mission.imagery == "sentinel2" else self.library.naip()
 
+    def _download(self, mission: Mission, cache: CellCache, what: str, live: dict):
+        """Download the corridor's cells that are not cached."""
         def fetch(cell):
             if not live["cancel"]:
                 cache.fetch(cell)
@@ -181,15 +200,94 @@ class SimRuns:
 
         with self._download_lock:
             cells = [c for c in mission.required_cells() if not cache.has(c)]
-            live.update(state="fetching", cells={"done": 0, "total": len(cells)})
+            live.update(state="fetching", fetching=what, cells={"done": 0, "total": len(cells)})
             with ThreadPoolExecutor(max_workers=self.fetch_threads) as pool:
                 list(pool.map(fetch, cells))
+
+    def choose_pass(self, mission: Mission, options: SimOptions) -> str | None:
+        """The Sentinel-2 pass for a flight: the one asked for, the last, or one of a year's by the seed.
+
+        All of a year's passes count, however cloudy, so that over many seeds
+        flights meet clouds as often as that year had them.
+        """
+        if options.pass_date:
+            return options.pass_date
+        bbox = mission.corridor()[1].bounds
+        s2 = self.library.sentinel2
+        if isinstance(options.world_year, int):
+            passes = s2.passes(bbox, f"{options.world_year}-01-01", f"{options.world_year}-12-31")
+            if not passes:
+                return None
+            dates = sorted(p["date"] for p in passes)
+            return dates[int(np.random.default_rng([options.seed, options.world_year]).integers(len(dates)))]
+        passes = s2.passes(bbox, limit=1)
+        return passes[0]["date"] if passes else None
+
+    def _build_world(self, mission: Mission, options: SimOptions, bundle: Path, live: dict, d: Path) -> Path | None:
+        """Mosaic what the camera sees, with its clouds, downloading the cells that are not cached.
+
+        Returns:
+            The imagery to render the camera from, or None for the map itself.
+        """
+        sentinel = options.world_imagery == "sentinel2" and options.world_year is not None
+        clouds, base = options.clouds, 0.0
+        if clouds == "auto":
+            clouds, base = ("real", CLOUD_BASE_M) if mission.max_alt() >= CLOUD_BASE_M else ("none", 0.0)
+        info = {"choice": options.clouds, "clouds": clouds, "base_m": base, "pass_date": None}
+        date = None
+        if sentinel or clouds != "none":
+            try:
+                date = self.choose_pass(mission, options)
+            except Exception as exc:  # noqa: BLE001  e.g. offline: fly without, and say so
+                log.warning("no Sentinel-2 pass: %s", exc)
+                info["note"] = f"Could not reach Sentinel-2 ({exc}), so no clouds."
+            if date is None and "note" not in info:
+                info["note"] = "No Sentinel-2 pass for that date, so no clouds."
+            if sentinel and date is None:
+                raise ValueError(info["note"])
+
+        path, pass_tif = bundle / "world.tif", bundle / "pass.tif"
+        if date:
+            pass_cache = self.library.on_date(date)
+            self._download(mission, pass_cache, f"Sentinel-2 pass of {date}", live)
+            if live["cancel"]:
+                return None
+            build_map(mission, pass_cache, pass_tif, scl=True)
+            info["pass_date"] = date
+
+        if sentinel and clouds == "real":
+            coverage = build_map(mission, self.library.on_date(date), path)["coverage"]
+        elif sentinel:
+            ground = self.library.clear(date)
+            self._download(mission, ground, f"clear Sentinel-2 as of {date}", live)
+            coverage = build_map(mission, ground, path)["coverage"]
+        elif options.world_year:
+            year = options.world_year
+            ground = self.library.naip() if year == "newest" else self.library.naip(year)
+            self._download(mission, ground, f"NAIP {'' if year == 'newest' else year}".strip(), live)
+            coverage = build_map(mission, ground, path)["coverage"]
+        elif date:
+            coverage = build_map(mission, self.plan_cache(mission), path)["coverage"]
+        else:
+            (d / "world.json").write_text(json.dumps(info))
+            return None
         if live["cancel"]:
-            return bundle
-        path = bundle / "world.tif"
-        coverage = build_map(mission, cache, path)["coverage"]
+            return None
         if coverage < 0.5:
-            raise ValueError(f"NAIP ({year}) covers only {100 * coverage:.0f}% of the corridor")
+            raise ValueError(f"The camera's imagery covers only {100 * coverage:.0f}% of the corridor")
+        if date and base:
+            # What the camera sees below the clouds, on the climb and the descent.
+            clear = bundle / "world_clear.tif"
+            if sentinel:
+                ground = self.library.clear(date)
+                self._download(mission, ground, f"clear Sentinel-2 as of {date}", live)
+                build_map(mission, ground, clear)
+            else:
+                shutil.copy(path, clear)
+            self.clear_worlds[d.name] = (clear, base)
+        if date:
+            info.update(overlay(path, pass_tif, clouds=clouds == "real", shadows=clouds != "none" and not (sentinel and clouds == "real")))
+        (d / "world.json").write_text(json.dumps(info))
         return path
 
     def _last_record(self, d: Path) -> dict | None:
@@ -217,10 +315,12 @@ class SimRuns:
         out = json.loads((d / "run.json").read_text())
         out["state"] = self.state(run_id)
         out["viewable"] = (d / "scene.json").exists()
+        out["world"] = json.loads((d / "world.json").read_text()) if (d / "world.json").exists() else None
         out["summary"] = json.loads((d / "summary.json").read_text()) if out["state"] == "finished" else None
         out["error"] = (d / "error.txt").read_text() if out["state"] == "failed" else None
         live = self._live.get(run_id)
         out["cells"] = dict(live["cells"]) if live and live["cells"] else None
+        out["fetching"] = live.get("fetching") if live else None
         out["progress"] = None
         if out["state"] == "running" and out["viewable"]:
             rec = self._last_record(d)

@@ -28,6 +28,7 @@ import cv2
 import numpy as np
 
 from .appearance import Appearance, CameraLook
+from .fog import Fog, FogLayer
 from .geo import MapRaster
 from .navigator import Navigator
 from .ortho import CameraModel
@@ -55,6 +56,7 @@ class SimConfig:
     att_noise_deg: float = 1.0                 # slowly varying AHRS errors (see sim.SensorErrors)
     yaw_noise_deg: float = 3.0
     alt_noise_frac: float = 0.01
+    cloud_base_m: float = 0.0                  # below this the camera sees clear_world instead of world
     compass_bias_deg: float = 0.0              # lasting errors, which only map fixes can correct
     height_bias_pct: float = 0.0
     min_vision_alt: float = 25.0               # map matching only above this; odometry below
@@ -65,6 +67,7 @@ class SimConfig:
     max_time: float = 1800.0
     seed: int = 0
     appearance: Appearance = Appearance()      # default: frames show the imagery as it is
+    fog: Fog | None = None
 
 
 class AxisEKF:
@@ -110,6 +113,7 @@ class FlightSim:
     meta: dict
     cfg: SimConfig = field(default_factory=SimConfig)
     world: MapRaster | None = None  # imagery camera frames are rendered from (default: map)
+    clear_world: MapRaster | None = None  # the same without clouds, for below cfg.cloud_base_m
 
     def __post_init__(self):
         if self.world is None:
@@ -119,6 +123,7 @@ class FlightSim:
         self.origin = np.array(self.map.px_to_grid(w / 2, h / 2))
         self.rng = np.random.default_rng(self.cfg.seed)
         self.look = CameraLook(self.cfg.appearance, [self.cfg.seed, 1])
+        self.fog = FogLayer(self.cfg.fog, self.cam, self.cfg.seed, self.cfg.wind) if self.cfg.fog else None
         m = self.meta["mission"]
         self.home = self._ll_to_local(self.meta["home"]["lat"], self.meta["home"]["lon"])
         wps = [(*self._ll_to_local(w["lat"], w["lon"]), w["alt"] or m["default_alt"]) for w in m["waypoints"]]
@@ -165,10 +170,31 @@ class FlightSim:
             "navigation": "odometry" if self.odometry_only else "map",
             # Without a navigator this only describes the map for `visnav view`, whose vehicle has wind of its own.
             "wind": {"steady": [float(v) for v in self.cfg.wind], "gust_sigma": self.cfg.gust_sigma} if self.nav else None,
+            "clouds": self._cloud_layer(),
+            "fog": self.cfg.fog.as_dict() if self.cfg.fog else None,
             "camera": {"hfov_deg": math.degrees(2 * math.atan(self.cam.width / 2 / self.cam.fx)),
                        "aspect": self.cam.height / self.cam.width},
             "gsd": self.map.gsd,
         }
+
+    def _cloud_layer(self, max_px: int = 1024) -> dict | None:
+        """The clouds as an image with transparency, and where it goes, for the viewer to show above cloud_base_m."""
+        world = self.world
+        if world is None or world.cloud is None or not world.cloud.any():
+            return None
+        h, w = world.shape
+        s = min(1.0, max_px / max(h, w))
+        layer = np.dstack([cv2.cvtColor(world.rgb, cv2.COLOR_RGB2BGR), world.cloud])
+        layer[world.cloud == 0] = 0  # keeps the file small
+        layer = cv2.resize(layer, (max(int(w * s), 1), max(int(h * s), 1)), interpolation=cv2.INTER_AREA)
+        x0, y0 = np.array(world.px_to_grid(0, 0)) - self.origin
+        x1, y1 = np.array(world.px_to_grid(w, h)) - self.origin
+        png = base64.b64encode(cv2.imencode(".png", layer)[1]).decode()
+        return {"image": "data:image/png;base64," + png, "extent": [float(x0), float(y1), float(x1), float(y0)],
+                "base_m": self.cfg.cloud_base_m}
+
+    def _camera_world(self, height: float) -> MapRaster:
+        return self.clear_world if self.clear_world is not None and height < self.cfg.cloud_base_m else self.world
 
     # Guidance and control -----------------------------------------------------
     def _target(self):
@@ -232,7 +258,7 @@ class FlightSim:
         # Leg completion.
         if kind == "takeoff" and tr.p[2] > talt - 1:
             self.leg += 1
-        elif kind == "wp" and dist < self.cfg.accept_radius:
+        elif kind == "wp" and dist < self.cfg.accept_radius and abs(tr.p[2] - talt) < 5.0:  # in height too, as ArduPilot does
             self.leg += 1
         elif kind == "land" and tr.p[2] <= 0.05:
             self.landed = True
@@ -262,8 +288,10 @@ class FlightSim:
                 img = None
                 if tr.p[2] > 0.3:  # on the ground the camera sees only the landing gear's shadow
                     lat, lon = self._local_to_ll(tr.p[0], tr.p[1])
-                    raw = render(self.world, self.cam, lat, lon, tr.p[2], tr.roll, tr.pitch, tr.yaw)
+                    raw = render(self._camera_world(tr.p[2]), self.cam, lat, lon, tr.p[2], tr.roll, tr.pitch, tr.yaw)
                     off_imagery += int(np.mean(raw[..., 1] == 0) > 0.5)
+                    if self.fog:
+                        raw = self.fog(raw, self.t, tr.p[0], tr.p[1], tr.p[2], tr.roll, tr.pitch, tr.yaw)
                     img = self.look(raw, self.t)
                     frames += 1
                     map_frames += int(tr.p[2] >= cfg.min_vision_alt)
@@ -340,6 +368,7 @@ class FlightSim:
             "frames_off_imagery": off_imagery,
             "landing_error_m": round(float(np.linalg.norm(self.truth.p[:2] - np.array(self.plan[-1][1:3]))), 2),
             "appearance": cfg.appearance.changes(),
+            "fog": cfg.fog.as_dict() if cfg.fog else None,
             "compass_bias_deg": cfg.compass_bias_deg,
             "height_bias_pct": cfg.height_bias_pct,
         }

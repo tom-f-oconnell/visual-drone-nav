@@ -30,6 +30,7 @@ def client(tmp_path_factory):
         synthetic_map(str(naip_dir / "m_synthetic_20220701.tif"), LAT, LON, size_m=2400, gsd=0.6, seed=3)
     os.environ["NAIPNAV_DATA"] = str(tmp_path_factory.mktemp("data"))
     os.environ["NAIPNAV_SOURCE"] = str(naip_dir)
+    os.environ["NAIPNAV_S2_SOURCE"] = str(tmp_path_factory.mktemp("no_s2"))  # caching also keeps a pass where there is one
     import planner.app
 
     importlib.reload(planner.app)
@@ -160,3 +161,24 @@ def test_closed_loop_flight_sim(client, tmp_path):
     html = out.read_text()
     assert "window.NAVSIM" in html and "three.min.js" in html and "__THREE_SRC__" not in html
     assert 'id="windrose"' in html and '"wind":[' in html and '"steady":[' in html
+    assert 'id="jump"' in html
+
+
+def test_waypoint_counts_as_reached_only_at_its_height(tmp_path):
+    """A climb too long for the leg must not be cut short by arriving overhead, as ArduPilot would not."""
+    from visnav.flightsim import FlightSim, SimConfig
+    from visnav.geo import MapRaster
+    from visnav.ortho import CameraModel
+    from visnav.sim import synthetic_map
+
+    world = MapRaster.load(synthetic_map(str(tmp_path / "m_s_20220701.tif"), LAT, LON, size_m=800, gsd=2.0, seed=1))
+    meta = {"home": {"lat": LAT, "lon": LON}, "mission": {"default_alt": 300, "takeoff_alt": 30, "speed": 10, "end_action": "land", "name": "t",
+                                                          "waypoints": [{"lat": LAT, "lon": LON, "alt": None}, {"lat": LAT + 0.0002, "lon": LON, "alt": None}]}}
+    sim = FlightSim(world, CameraModel.from_hfov(160, 100, 90), None, meta, SimConfig())
+    sim.leg = 1  # flying to the first waypoint, which is above home
+    sim.truth.p[2] = 100.0
+    sim._control(sim.home, np.zeros(2), 0.02)
+    assert sim.leg == 1  # overhead, but too low
+    sim.truth.p[2] = 299.0
+    sim._control(sim.home, np.zeros(2), 0.02)
+    assert sim.leg == 2

@@ -24,6 +24,7 @@ import numpy as np
 from pyproj import Geod
 
 from .appearance import Appearance, CameraLook
+from .fog import Fog, FogLayer
 from .geo import MapRaster
 from .matcher import ChainMatcher, CorrMatcher, FeatureBackend, MapMatcher
 from .navigator import Navigator
@@ -49,6 +50,13 @@ def appearance_from_args(args) -> Appearance:
         return Appearance.parse(args.appearance, getattr(args, "seed", None))
     except ValueError as exc:
         raise SystemExit(f"--appearance: {exc}") from exc
+
+
+def fog_from_args(args) -> Fog | None:
+    try:
+        return Fog.parse(args.fog)
+    except ValueError as exc:
+        raise SystemExit(f"--fog: {exc}") from exc
 
 
 def camera_from_args(args, meta) -> CameraModel:
@@ -96,9 +104,9 @@ def cmd_run(args):
     if args.camera == "sitl":
         from .camera import SitlCamera
 
-        look = CameraLook(appearance_from_args(args))
-        print("camera appearance:", look.appearance.changes() or "unchanged")
-        grabber = SitlCamera(ap, load_world(args, map_), cam, look=look)
+        look, fog = CameraLook(appearance_from_args(args)), fog_from_args(args)
+        print("camera appearance:", look.appearance.changes() or "unchanged", "| fog:", fog or "none")
+        grabber = SitlCamera(ap, load_world(args, map_), cam, look=look, fog=FogLayer(fog, cam) if fog else None)
         args.latency = 0.0
     else:
         grabber = FrameGrabber(args.camera, cam.width, cam.height)
@@ -168,6 +176,8 @@ def cmd_sim(args):
     cam = camera_from_args(args, meta)
     rng = np.random.default_rng(args.seed)
     look = CameraLook(appearance_from_args(args), [args.seed, 1])
+    fog = fog_from_args(args)
+    fog_layer = FogLayer(fog, cam, args.seed) if fog else None
     route = [(w["lat"], w["lon"], w["alt"] or meta["mission"]["default_alt"]) for w in meta["mission"]["waypoints"]]
     # Start the filter from a deliberately wrong position to exercise acquisition.
     # Odometry alone has no way to find its way back from a wrong start.
@@ -181,7 +191,11 @@ def cmd_sim(args):
         if args.frames and n >= args.frames:
             break
         n += 1
-        img = look(render(world, cam, pose.lat, pose.lon, pose.h, pose.roll, pose.pitch, pose.yaw), pose.t)
+        img = render(world, cam, pose.lat, pose.lon, pose.h, pose.roll, pose.pitch, pose.yaw)
+        if fog_layer:
+            east, north = map_.ll_to_grid(pose.lat, pose.lon)
+            img = fog_layer(img, pose.t, east, north, pose.h, pose.roll, pose.pitch, pose.yaw)
+        img = look(img, pose.t)
         roll, pitch, yaw, h = sensors(pose.t, pose.roll, pose.pitch, pose.yaw, pose.h)
         t0 = time.perf_counter()
         fix = nav.process(img, pose.t, roll, pitch, yaw, h)
@@ -200,6 +214,7 @@ def cmd_sim(args):
         "err_max_m": round(float(e.max()), 2) if len(e) else None,
         "ms_per_frame": round(1000 * float(np.mean(comp)), 1),
         "appearance": look.appearance.changes(),
+        "fog": fog.as_dict() if fog else None,
     }
     print(json.dumps(report, indent=2))
     return report
@@ -233,9 +248,10 @@ def build_flight(args):
     cam = camera_from_args(args, meta)
     nav = build_navigator(args, meta, map_, cam)
     cfg = SimConfig(seed=args.seed, camera_hz=args.camera_hz, wind=(args.wind_e, args.wind_n),
-                    gust_sigma=args.gust, min_vision_alt=args.min_alt, appearance=appearance_from_args(args),
-                    compass_bias_deg=args.compass_bias, height_bias_pct=args.height_bias)
-    return FlightSim(map_, cam, nav, meta, cfg, world=load_world(args, map_)), map_
+                    gust_sigma=args.gust, min_vision_alt=args.min_alt, appearance=appearance_from_args(args), fog=fog_from_args(args),
+                    compass_bias_deg=args.compass_bias, height_bias_pct=args.height_bias, cloud_base_m=args.cloud_base)
+    clear = MapRaster.load(args.clear_world) if args.clear_world else None
+    return FlightSim(map_, cam, nav, meta, cfg, world=load_world(args, map_), clear_world=clear), map_
 
 
 def cmd_sim3d(args):
@@ -356,6 +372,13 @@ def main(argv=None):
                         help='how simulated frames differ from that imagery: "name=value,..." with gamma, red, green, '
                              "blue, blur, noise, brightness_drift, color_drift, gamma_drift, drift_tau_s, or "
                              '"random" for realistic values (from --seed where there is one). Default: no change')
+        sp.add_argument("--fog", default="", help='fog in simulated frames, at any height: "on", or "name=value,..." with '
+                                                  "visibility (m), top (m), patchiness (0 to 1), patch (m), brightness (0 to 1), "
+                                                  "defaults for those left out. Default: none")
+
+    def clouds(sp):
+        sp.add_argument("--clear-world", help="imagery without clouds, seen from below --cloud-base instead of --world")
+        sp.add_argument("--cloud-base", type=float, default=0.0, help="m AGL below which the camera is under the clouds")
 
     def lasting_errors(sp):
         sp.add_argument("--compass-bias", type=float, default=0.0,
@@ -417,12 +440,14 @@ def main(argv=None):
     f.add_argument("--run-dir", help="existing directory to write scene.json, map.jpg, records.jsonl (as the flight "
                                      "goes) and summary.json to; the planner website follows runs this way")
     lasting_errors(f)
+    clouds(f)
     f.set_defaults(func=cmd_sim3d)
 
     c = sub.add_parser("compare", help="fly the same mission with and without map matching")
     common(c)
     simulated_camera(c)
     lasting_errors(c)
+    clouds(c)
     c.add_argument("--seed", type=int, default=0, help="first seed")
     c.add_argument("--seeds", type=int, default=3, help="how many seeds to fly each way")
     c.add_argument("--jobs", type=int, default=6, help="flights at once")

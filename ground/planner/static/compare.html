@@ -280,8 +280,15 @@ function drawTable() {
 function drawText() {
   const o = runs[0].options;
   const wind = `wind ${o.wind_speed} m/s from ${o.wind_from_deg}°, gusts ${o.gust} m/s, seed ${o.seed}`;
-  const worldName = o.world_year === "newest" ? "the newest NAIP" : `NAIP ${o.world_year}`;
-  const camera = (runs[0].imagery === "sentinel2" ? "map from Sentinel-2, " : "") + (o.world_year ? `camera sees ${worldName}` : "camera sees the map's own imagery");
+  const worldName = o.world_imagery === "sentinel2"
+    ? (o.world_year === "newest" ? "the last Sentinel-2 pass" : `Sentinel-2 from ${o.world_year}`)
+    : o.world_year === "newest" ? "the newest NAIP" : `NAIP ${o.world_year}`;
+  const w = runs[0].world;
+  const sky = !w || w.clouds === "none" || !w.pass_date ? ", no clouds"
+    : w.clouds === "real" ? `, clouds of ${w.pass_date} (${w.cloud_pct}% of the route${w.base_m ? `, seen above ${w.base_m} m` : ""})`
+    : `, cloud shadows of ${w.pass_date} (${w.shadow_pct}% of the route)`;
+  const fog = o.fog && Object.keys(o.fog).length ? `, fog of ${o.fog.visibility} m visibility up to ${o.fog.top} m` : "";
+  const camera = (runs[0].imagery === "sentinel2" ? "map from Sentinel-2, " : "") + (o.world_year ? `camera sees ${worldName}` : "camera sees the map's own imagery") + sky + fog;
   const look = Object.keys(o.appearance || {}).length ? ", camera appearance changed" : "";
   $("conditions").textContent = `Same route and settings for both: ${camera}${look}, ${wind}, compass bias ${o.compass_bias_deg ?? 0}°, height bias ${o.height_bias_pct ?? 0}%.`;
 

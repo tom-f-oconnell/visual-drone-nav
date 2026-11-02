@@ -13,14 +13,16 @@ Three imagery sources are supported:
   finer than the cache GSD (e.g. 0.3 m NAIP from 2022 on) are read from a COG
   overview, so they cost no more than 0.6 m scenes.
 * ``Sentinel2Source``: Sentinel-2 true colour from the same API, worldwide at
-  10 m, read the same way. Newest clear scenes first, with each scene's cloud
-  classification keeping clouds out of the cell.
+  10 m, read the same way. For maps, the newest clear scenes as of some date, with
+  each scene's cloud classification keeping clouds out of the cell. For simulated
+  flights, one pass as it was, clouds and all (``PassSource``).
 * ``LocalSource``: a directory of GeoTIFFs you downloaded yourself (for example
   NAIP from USGS EarthExplorer), useful offline or on an air-gapped laptop.
 """
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import math
@@ -29,7 +31,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Protocol
+from typing import Callable, Iterable, Protocol
 
 import numpy as np
 import rasterio
@@ -107,6 +109,7 @@ class SceneRef:
     id: str = ""
     date: str = ""
     mask_href: str = ""  # Sentinel-2 scene classification, to keep clouds out
+    scl_href: str = ""   # the same, to store with the cell
 
 
 class Source(Protocol):
@@ -154,26 +157,75 @@ class StacSource:
 
 
 class Sentinel2Source(StacSource):
-    """Sentinel-2 L2A true colour from a STAC API, newest scenes first.
+    """Sentinel-2 L2A true colour from a STAC API.
+
+    ``scenes`` is what a clear map is made from: the newest scenes, as of a date
+    if given, that are not too cloudy. ``passes`` and ``pass_scenes`` are everything
+    that was flown over, however cloudy.
 
     Args:
         url: STAC API.
-        max_cloud: scenes cloudier than this percentage are not used.
+        max_cloud: scenes cloudier than this percentage are not used for clear maps.
         max_scenes: how many scenes to look through for each cell. Sentinel-2
             passes every few days, so this reaches back a few months.
+        as_of: newest date to use for clear maps (YYYY-MM-DD), by default today.
     """
 
     name = "sentinel-2"
 
-    def __init__(self, url: str = PC_STAC_URL, max_cloud: float = 20.0, max_scenes: int = 16):
+    def __init__(self, url: str = PC_STAC_URL, max_cloud: float = 20.0, max_scenes: int = 16, as_of: str | None = None):
         super().__init__(url, collection="sentinel-2-l2a", asset="visual")
-        self.max_cloud, self.max_scenes = max_cloud, max_scenes
+        self.max_cloud, self.max_scenes, self.as_of = max_cloud, max_scenes, as_of
+
+    @property
+    def tag(self) -> str:
+        return f"asof{self.as_of}" if self.as_of else ""
+
+    def at(self, as_of: str | None) -> "Sentinel2Source":
+        return Sentinel2Source(self.url, self.max_cloud, self.max_scenes, as_of)
+
+    def _ref(self, item, **kw) -> SceneRef:
+        return SceneRef(item.assets[self.asset].href, item.datetime.year, item.id, item.datetime.date().isoformat(), **kw)
 
     def scenes(self, bbox):
+        when = {"datetime": f"2015-01-01/{self.as_of}"} if self.as_of else {}
         search = self._open().search(collections=[self.collection], bbox=list(bbox), max_items=self.max_scenes,
-                                     query={"eo:cloud_cover": {"lt": self.max_cloud}}, sortby="-properties.datetime")
-        return [SceneRef(item.assets[self.asset].href, item.datetime.year, item.id, item.datetime.date().isoformat(),
-                         item.assets["SCL"].href) for item in search.items()]
+                                     query={"eo:cloud_cover": {"lt": self.max_cloud}}, sortby="-properties.datetime", **when)
+        return [self._ref(item, mask_href=item.assets["SCL"].href) for item in search.items()]
+
+    def passes(self, bbox, start: str | None = None, end: str | None = None, limit: int = 500) -> list[dict]:
+        """Every date with a pass over bbox, newest first, with its cloud percentage over the whole 110 km tile."""
+        when = {"datetime": f"{start or '2015-01-01'}/{end or '2100-01-01'}"} if start or end else {}
+        search = self._open().search(collections=[self.collection], bbox=list(bbox), max_items=limit, sortby="-properties.datetime", **when)
+        dates: dict[str, list[float]] = {}
+        for item in search.items():
+            dates.setdefault(item.datetime.date().isoformat(), []).append(float(item.properties.get("eo:cloud_cover", 0.0)))
+        return [{"date": d, "cloud_pct": round(sum(c) / len(c))} for d, c in dates.items()]
+
+    def first_year(self, bbox) -> int | None:
+        items = list(self._open().search(collections=[self.collection], bbox=list(bbox), max_items=1, sortby="properties.datetime").items())
+        return items[0].datetime.year if items else None
+
+    def pass_scenes(self, bbox, date: str) -> list[SceneRef]:
+        """Scenes of one date first, then the nearest in time, for ground that pass did not reach."""
+        day = datetime.date.fromisoformat(date)
+        span = datetime.timedelta(days=15)
+        search = self._open().search(collections=[self.collection], bbox=list(bbox), max_items=40,
+                                     datetime=f"{day - span}/{day + span}", sortby="-properties.datetime")
+        refs = [self._ref(item, scl_href=item.assets["SCL"].href) for item in search.items()]
+        return sorted(refs, key=lambda r: abs((datetime.date.fromisoformat(r.date) - day).days))
+
+
+class PassSource:
+    """One Sentinel-2 pass as it was, clouds and all, with its scene classification, for simulated flights."""
+
+    name = "sentinel-2-pass"
+
+    def __init__(self, source, date: str):
+        self.source, self.date, self.tag = source, date, f"pass{date}"
+
+    def scenes(self, bbox):
+        return self.source.pass_scenes(bbox, self.date)
 
 
 class LocalSource:
@@ -212,6 +264,61 @@ def _year_from_name(name: str) -> int:
     # NAIP file names end in _YYYYMMDD.tif, e.g. m_3910501_ne_13_060_20210620.tif
     digits = name.rsplit("_", 1)[-1][:4]
     return int(digits) if digits.isdigit() else 0
+
+
+class LocalSentinel2Source:
+    """Sentinel-2 as GeoTIFFs in a directory: *_YYYYMMDD.tif, each with an optional classification *_YYYYMMDD_scl.tif."""
+
+    name = "local-sentinel-2"
+
+    def __init__(self, root: str | os.PathLike, as_of: str | None = None):
+        self.root, self.as_of = Path(root), as_of
+
+    @property
+    def tag(self) -> str:
+        return f"asof{self.as_of}" if self.as_of else ""
+
+    def at(self, as_of: str | None) -> "LocalSentinel2Source":
+        return LocalSentinel2Source(self.root, as_of)
+
+    def _files(self, bbox) -> list[SceneRef]:
+        """Scenes over bbox, newest first, with mask_href set where there is a classification."""
+        w, s, e, n = bbox
+        refs = []
+        for p in sorted(self.root.rglob("*.tif")):
+            if p.stem.endswith("_scl"):
+                continue
+            digits = p.stem.rsplit("_", 1)[-1]
+            with rasterio.open(p) as src:
+                l, b, r, t = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
+            if l < e and r > w and b < n and t > s:
+                scl = p.with_name(f"{p.stem}_scl.tif")
+                refs.append(SceneRef(str(p), int(digits[:4]), p.stem, f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}", str(scl) if scl.exists() else ""))
+        return sorted(refs, key=lambda r: r.date, reverse=True)
+
+    def scenes(self, bbox):
+        return [r for r in self._files(bbox) if not self.as_of or r.date <= self.as_of]
+
+    def passes(self, bbox, start: str | None = None, end: str | None = None, limit: int = 500) -> list[dict]:
+        out = []
+        for r in self._files(bbox):
+            if (start and r.date < start) or (end and r.date > end):
+                continue
+            cloud = 0.0
+            if r.mask_href:
+                with rasterio.open(r.mask_href) as src:
+                    cloud = 100 * float(np.isin(src.read(1), (8, 9, 10)).mean())
+            out.append({"date": r.date, "cloud_pct": round(cloud)})
+        return out[:limit]
+
+    def first_year(self, bbox) -> int | None:
+        files = self._files(bbox)
+        return files[-1].year if files else None
+
+    def pass_scenes(self, bbox, date: str) -> list[SceneRef]:
+        day = datetime.date.fromisoformat(date)
+        refs = [SceneRef(r.href, r.year, r.id, r.date, scl_href=r.mask_href) for r in self._files(bbox)]
+        return sorted(refs, key=lambda r: abs((datetime.date.fromisoformat(r.date) - day).days))
 
 
 def read_scene(href: str, crs: str, transform, width: int, height: int) -> np.ndarray | None:
@@ -255,6 +362,11 @@ S2_UNCLEAR = (0, 1, 3, 8, 9, 10, 11)
 
 def read_clear(href: str, crs: str, transform, width: int, height: int) -> np.ndarray:
     """Pixels of a grid that a Sentinel-2 scene classification (SCL) calls clear."""
+    return ~np.isin(read_scl(href, crs, transform, width, height), S2_UNCLEAR)
+
+
+def read_scl(href: str, crs: str, transform, width: int, height: int) -> np.ndarray:
+    """A Sentinel-2 scene classification on a grid, 0 where it has no data."""
     with rasterio.open(href) as src:
         bounds = transform_bounds(crs, src.crs, *array_bounds(height, width, transform), densify_pts=21)
         win = from_bounds(*bounds, src.transform)
@@ -262,20 +374,21 @@ def read_clear(href: str, crs: str, transform, width: int, height: int) -> np.nd
         try:
             win = win.intersection(Window(0, 0, src.width, src.height))
         except WindowError:
-            return np.zeros((height, width), bool)
+            return np.zeros((height, width), np.uint8)
         data = src.read(1, window=win)
         src_transform, src_crs = src.window_transform(win), src.crs
     out = np.zeros((height, width), np.uint8)
     reproject(data, out, src_transform=src_transform, src_crs=src_crs, dst_transform=transform, dst_crs=crs,
               resampling=Resampling.nearest)
-    return ~np.isin(out, S2_UNCLEAR)
+    return out
 
 
 class CellCache:
-    """Cell cache on disk: <root>/gsd_<gsd>[_y<years>]/<key>.tif plus a JSON sidecar.
+    """Cell cache on disk: <root>/gsd_<gsd>[_y<years>][_<tag>]/<key>.tif plus a JSON sidecar.
 
     Sources limited to some NAIP years get their own directory, so changing
-    NAIPNAV_YEARS never silently reuses cells cached from other years.
+    NAIPNAV_YEARS never silently reuses cells cached from other years. So do
+    Sentinel-2 dates, which is what lets several be stored at once.
     """
 
     def __init__(self, root: str | os.PathLike, source: Source, gsd: float = 0.6):
@@ -284,6 +397,8 @@ class CellCache:
         self.gsd = gsd
         years = getattr(source, "years", None)
         suffix = "_y" + "-".join(str(y) for y in sorted(years)) if years else ""
+        tag = getattr(source, "tag", "")
+        suffix += f"_{tag}" if tag else ""
         self.dir = self.root / f"gsd_{gsd:.2f}{suffix}"
         self.dir.mkdir(parents=True, exist_ok=True)
 
@@ -305,7 +420,7 @@ class CellCache:
         crs, transform, width, height = cell.grid(self.gsd)
         rgb = np.zeros((3, height, width), np.uint8)
         filled = np.zeros((height, width), bool)
-        used, first = [], None
+        used, first, scl = [], None, None
         with rasterio.Env(**GDAL_ENV):
             for scene in self.source.scenes(cell.bbox):
                 if filled.all():
@@ -324,6 +439,9 @@ class CellCache:
                 if not valid.any():
                     continue
                 rgb[:, valid] = data[:, valid]
+                if scene.scl_href:
+                    scl = np.zeros((height, width), np.uint8) if scl is None else scl
+                    scl[valid] = read_scl(scene.scl_href, crs, transform, width, height)[valid]
                 filled |= valid
                 used.append({"id": scene.id, "year": scene.year, "date": scene.date})
             # Clouds or snow in every scene looked at: better seen than a hole in the map.
@@ -339,11 +457,13 @@ class CellCache:
             return None
         tmp = dst.with_suffix(f".{uuid.uuid4().hex[:8]}.tmp.tif")
         with rasterio.open(
-            tmp, "w", driver="GTiff", width=width, height=height, count=3, dtype="uint8",
+            tmp, "w", driver="GTiff", width=width, height=height, count=3 if scl is None else 4, dtype="uint8",
             crs=crs, transform=transform, nodata=0, tiled=True, blockxsize=256, blockysize=256,
             compress="deflate", predictor=2,
         ) as out:
-            out.write(rgb)
+            out.write(rgb, [1, 2, 3])
+            if scl is not None:
+                out.write(scl, 4)
             out.update_tags(SOURCE=self.source.name, SCENES=",".join(u["id"] for u in used))
         tmp.replace(dst)
         dst.with_suffix(".json").write_text(json.dumps({
@@ -356,4 +476,56 @@ class CellCache:
         out = []
         for p in self.dir.glob("*.json"):
             out.append(json.loads(p.read_text()))
+        return out
+
+
+class Library:
+    """Every imagery cache under a data directory.
+
+    Args:
+        data: the data directory.
+        naip_source: returns a NAIP source, limited to some years if given any.
+        sentinel2: Sentinel-2 source, for clear imagery and single passes.
+        naip_years: years NAIP is limited to by default, if any.
+        naip_gsd: NAIP cache resolution, m.
+        s2_gsd: Sentinel-2 cache resolution, m.
+    """
+
+    def __init__(self, data: Path, naip_source: Callable, sentinel2, naip_years: list[int] | None = None,
+                 naip_gsd: float = 0.6, s2_gsd: float = 10.0):
+        self.data, self.naip_source, self.sentinel2 = Path(data), naip_source, sentinel2
+        self.naip_gsd, self.s2_gsd = naip_gsd, s2_gsd
+        self.default_naip = CellCache(self.data / "naip", naip_source(naip_years), naip_gsd)
+        self._caches: dict[tuple, CellCache] = {}
+        self._lock = threading.Lock()
+
+    def _memo(self, key: tuple, build: Callable[[], CellCache]) -> CellCache:
+        with self._lock:
+            if key not in self._caches:
+                self._caches[key] = build()
+            return self._caches[key]
+
+    def naip(self, year: int | None = None) -> CellCache:
+        """The default NAIP cache, or one year's."""
+        if year is None:
+            return self.default_naip
+        return self._memo(("naip", year), lambda: CellCache(self.data / "naip", self.naip_source([year]), self.naip_gsd))
+
+    def clear(self, as_of: str | None = None) -> CellCache:
+        """Sentinel-2 made clear of clouds, newest or as of a date. Each date is stored separately."""
+        return self._memo(("clear", as_of), lambda: CellCache(self.data / "sentinel2", self.sentinel2.at(as_of), self.s2_gsd))
+
+    def on_date(self, date: str) -> CellCache:
+        """One Sentinel-2 pass as it was, clouds and all."""
+        return self._memo(("pass", date), lambda: CellCache(self.data / "sentinel2", PassSource(self.sentinel2, date), self.s2_gsd))
+
+    def stored(self, cells: list[Cell]) -> dict:
+        """Sentinel-2 dates stored for all these cells: clear as-of dates and passes as they were, newest first."""
+        out = {"clear": [], "passes": []}
+        for d in sorted((self.data / "sentinel2").glob("gsd_*"), reverse=True):
+            if cells and all((d / f"{c.key}.tif").exists() for c in cells):
+                if "_pass" in d.name:
+                    out["passes"].append(d.name.rsplit("_pass", 1)[1])
+                else:
+                    out["clear"].append(d.name.rsplit("_asof", 1)[1] if "_asof" in d.name else "newest")
         return out

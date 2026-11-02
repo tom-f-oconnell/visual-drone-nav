@@ -1,5 +1,6 @@
 :root { --bg: #fafaf8; --fg: #1d1d1b; --muted: #6b6b66; --line: #ddddd6; --accent: #1f6feb; --warn: #b4540a; }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; font: 14px/1.4 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
 body { display: flex; }
 #panel { width: 340px; flex: none; overflow-y: auto; padding: 14px 16px; border-right: 1px solid var(--line); }
@@ -48,12 +49,20 @@ ol#wps .wp button { padding: 1px 6px; }
 #sim_result:empty { display: none; }
 #sim_runs { flex: 1; min-width: 0; }
 #sim_missing { font-size: 12px; color: var(--muted); }
+#fog_bar label { flex: 1; }
+#fog_box { font-size: 12px; margin-bottom: 8px; }
+#fog_box summary { cursor: pointer; color: var(--muted); margin-bottom: 4px; }
 #look_bar { align-items: center; font-size: 12px; margin-bottom: 4px; }
 #look_bar span { flex: 1; color: var(--muted); }
 #look_bar small { display: block; font-size: 11px; color: var(--fg); }
 #look_bar button { padding: 3px 8px; font-size: 12px; }
 #look { font-size: 12px; margin-bottom: 8px; }
 #look summary { cursor: pointer; color: var(--muted); }
+.clouds-row { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 8px; }
+#clouds_state { flex: 1; color: var(--muted); border-radius: 3px; padding: 2px 4px; margin-left: -4px; }
+#sim_clouds { width: auto; flex: none; }
+@keyframes clouds-changed { from { background: #ffe59a; color: var(--fg); } to { background: transparent; } }
+#clouds_state.changed { animation: clouds-changed 2.5s ease-out; }
 .hint { font-size: 11px; color: var(--muted); margin: 4px 0 6px; }
 .foot { font-size: 11px; color: var(--muted); }
 .wp-label { background: var(--accent); color: #fff; border-radius: 50%; width: 22px !important; height: 22px !important; margin: -11px 0 0 -11px !important; text-align: center; line-height: 22px; font-size: 11px; font-weight: 600; border: 2px solid #fff; }

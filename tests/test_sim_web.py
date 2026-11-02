@@ -30,6 +30,7 @@ def client(tmp_path_factory):
         synthetic_map(str(naip_dir / f"m_synthetic_{year}0701.tif"), LAT, LON, size_m=2400, gsd=0.6, seed=3)
     os.environ["NAIPNAV_DATA"] = str(tmp_path_factory.mktemp("data"))
     os.environ["NAIPNAV_SOURCE"] = str(naip_dir)
+    os.environ["NAIPNAV_S2_SOURCE"] = str(tmp_path_factory.mktemp("no_s2"))  # no passes, so no clouds
     import planner.app
 
     importlib.reload(planner.app)
@@ -85,6 +86,10 @@ def test_run_view_and_replay(client):
     # The bundle's GeoTIFFs are gone, what the viewer needs stays.
     import planner.app
 
+    for _ in range(120):  # removed just after the simulator exits, which is just after it says it finished
+        if not (planner.app.DATA / "sim" / run_id / "bundle").exists():
+            break
+        time.sleep(0.5)
     assert not (planner.app.DATA / "sim" / run_id / "bundle").exists()
     assert any(r["id"] == run_id for r in client.get("/api/sim/runs").json())
 
@@ -157,17 +162,17 @@ def test_imagery_label_names_the_naip_year(client, monkeypatch):
 
 def test_camera_appearance(client):
     """Unchanged unless asked; Randomize's values and hand-set ones reach the simulator, which reports them."""
-    from visnav.appearance import REALISTIC
+    from visnav.appearance import REALISTIC, Appearance
 
     values = client.get("/api/sim/appearance/random").json()
     assert set(values) == set(REALISTIC)
     assert all(REALISTIC[k][0] <= v <= REALISTIC[k][1] for k, v in values.items())
-    values["gamma"], values["blue"] = 1.1, 1.0  # the summary lists changes, and a random value can round to its default
+    values["blue"] = 1.0  # the summary lists changes, and a random value can round to its default
     run_id = client.post("/api/sim/runs", json={"mission": mission("look"), "options": {"appearance": values}}).json()["id"]
     run = wait_for(client, run_id, ("finished", "failed", "stopped"))
     assert run["state"] == "finished", run
     assert run["options"]["appearance"] == values
-    assert run["summary"]["appearance"] == {k: v for k, v in values.items() if k != "blue"}
+    assert run["summary"]["appearance"] == Appearance.from_dict(values).changes() and "blue" not in run["summary"]["appearance"]
 
 
 def test_compare_with_and_without_map_matching(client):
@@ -241,6 +246,9 @@ def test_refusals(client):
     assert client.post("/api/sim/runs", json={"mission": far}).status_code == 409
     for options in ({"wind_speed": -1}, {"navigation": "nonsense"}, {"compass_bias_deg": 90}):
         assert client.post("/api/sim/runs", json={"mission": mission(), "options": options}).status_code == 422
+    for fog in ({"visibility": 1}, {"nonsense": 1}):
+        r = client.post("/api/sim/runs", json={"mission": mission(), "options": {"fog": fog}})
+        assert r.status_code == 422 and "fog" in r.json()["detail"], r.text
     for look in ({"gamma": 0}, {"red": 99}, {"nonsense": 1}):
         r = client.post("/api/sim/runs", json={"mission": mission(), "options": {"appearance": look}})
         assert r.status_code == 422 and "camera appearance" in r.json()["detail"], r.text

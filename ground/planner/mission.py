@@ -66,6 +66,7 @@ class Mission(BaseModel):
     end_action: str = Field("rtl", pattern="^(rtl|land|none)$")
     corridor_m: float = Field(400.0, gt=0, description="imagery half-width around the route")
     imagery: Literal["naip", "sentinel2"] = Field("naip", description="what the map the vehicle navigates by is made from")
+    imagery_date: str | None = Field(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Sentinel-2 only: clear imagery as of this date, by default the newest")
     camera: Camera = Field(default_factory=Camera)
 
     @field_validator("name")
@@ -101,6 +102,10 @@ class Mission(BaseModel):
         geom, _, inv = self.route_utm()
         poly = geom.buffer(self.corridor_m)
         return poly, shapely.transform(poly, lambda c: np.column_stack(inv.transform(c[:, 0], c[:, 1])))
+
+    def max_alt(self) -> float:
+        """Highest planned altitude, m above home."""
+        return max([self.takeoff_alt, self.default_alt, *(self.alt_of(w) for w in self.waypoints)])
 
     def length_m(self) -> float:
         geom, _, _ = self.route_utm()
@@ -171,8 +176,15 @@ def _cell_box(cell: Cell):
     return box(*cell.bbox)
 
 
-def build_map(mission: Mission, cache: CellCache, out_path: Path) -> dict:
-    """Mosaic cached cells covering the mission corridor into one UTM GeoTIFF."""
+def build_map(mission: Mission, cache: CellCache, out_path: Path, scl: bool = False) -> dict:
+    """Mosaic cached cells covering the mission corridor into one UTM GeoTIFF.
+
+    Args:
+        mission: gives the corridor.
+        cache: cells to use.
+        out_path: where to write it.
+        scl: also mosaic the Sentinel-2 classification the cells hold, as a fourth band.
+    """
     poly_utm, _ = mission.corridor()
     gsd = cache.gsd
     l, b, r, t = poly_utm.bounds
@@ -183,6 +195,7 @@ def build_map(mission: Mission, cache: CellCache, out_path: Path) -> dict:
     crs = f"EPSG:{mission.epsg}"
 
     rgb = np.zeros((3, height, width), np.uint8)
+    classes = np.zeros((height, width), np.uint8)
     missing = []
     for cell in mission.required_cells():
         path = cache.path(cell)
@@ -196,17 +209,27 @@ def build_map(mission: Mission, cache: CellCache, out_path: Path) -> dict:
             data = vrt.read([1, 2, 3])
         valid = data.any(axis=0)
         rgb[:, valid] = data[:, valid]
+        if scl:
+            with rasterio.open(path) as src, WarpedVRT(
+                src, crs=crs, transform=transform, width=width, height=height,
+                resampling=Resampling.nearest, nodata=0,
+            ) as vrt:
+                if src.count >= 4:
+                    classes[valid] = vrt.read(4)[valid]
 
     outside = geometry_mask([mapping(poly_utm)], (height, width), transform, invert=False)
     rgb[:, outside] = 0
     coverage = float(rgb.any(axis=0)[~outside].mean()) if (~outside).any() else 0.0
 
     with rasterio.open(
-        out_path, "w", driver="GTiff", width=width, height=height, count=3, dtype="uint8",
+        out_path, "w", driver="GTiff", width=width, height=height, count=4 if scl else 3, dtype="uint8",
         crs=crs, transform=transform, nodata=0, tiled=True, blockxsize=512, blockysize=512,
         compress="deflate", predictor=2,
     ) as dst:
-        dst.write(rgb)
+        dst.write(rgb, [1, 2, 3])
+        if scl:
+            classes[outside] = 0
+            dst.write(classes, 4)
     return {
         "file": out_path.name, "crs": crs, "epsg": mission.epsg, "gsd": gsd,
         "width": width, "height": height, "transform": list(transform)[:6],
